@@ -17,39 +17,24 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 ```{r load and prepare data, include = FALSE, eval = TRUE, message = FALSE}
-# load packages -----------------------------------------------------------
+# load packages #######
 
 
-library(dplyr)
-library(smooth)
-library(ggplot2)
-library(reshape2)
-library(hrbrthemes)
-library(tidyr)
-library(viridis)
+library(tidyverse)
 library(gridExtra)
 library(cowplot)
-library(ggthemes)
 library(knitr)
 
-library(lme4)
-library(nlme)
 library(brms)
-# library(MASS)
-library(tidyverse)  # ggplot, dplyr, and friends
 library(ggridges)   # Ridge plots
-library(ggstance)   # Horizontal pointranges and bars
-library(patchwork)  # Lay out multiple ggplot plots; install from https://github.com/thomasp85/patchwork
-library(scales)     # Nicer formatting for numbers
-library(broom)
+
 library(loo)
 library(rstanarm)
 library(rstan)
 
-# load data ---------------------------------------------------------------
 
-# call functions
-source("plotting_functions.r")
+
+# call functions #######
 source("theme_functions_MB.r")
 logit <- function(x) log(x/(1-x))
 inv_logit <- function(x) 1/(1+exp(-x))
@@ -72,11 +57,11 @@ sf <- function(x, pub = 0, prob_vect = c(0.5,0.025,0.975), dec_no = 3) {
   } }
 
 
-# save greek letters often used:
+# save greek letters often used ######
 
 my_greeks = c("\U1D714", "\U1D6FE" , "\U1D702")
 
-# load data files 
+# load data #######
 data_beh <- readRDS(file = "Group Data/data_beh.rds")
 data_group <-readRDS(file = "Group Data/data_group.rds")
 
