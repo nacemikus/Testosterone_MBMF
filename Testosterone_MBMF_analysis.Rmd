@@ -1,7 +1,7 @@
 ---
 title: "Testosterone effects on model-based vs model-free learning"
 author: "NM"
-date: "06 04 2023"
+date: "17 8 2023"
 output:
   word_document: default
   pdf_document: default
@@ -14,43 +14,50 @@ editor_options:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+
 ```{r load and prepare data, include = FALSE, eval = TRUE, message = FALSE}
 # load packages -----------------------------------------------------------
 
 
-library(tidyverse)
+library(dplyr)
+library(smooth)
+library(ggplot2)
+library(reshape2)
+library(hrbrthemes)
+library(tidyr)
+library(viridis)
+library(gridExtra)
 library(cowplot)
+library(ggthemes)
+library(knitr)
+
 library(lme4)
+library(nlme)
 library(brms)
+# library(MASS)
+library(tidyverse)  # ggplot, dplyr, and friends
+library(ggridges)   # Ridge plots
+library(ggstance)   # Horizontal pointranges and bars
+library(patchwork)  # Lay out multiple ggplot plots; install from https://github.com/thomasp85/patchwork
+library(scales)     # Nicer formatting for numbers
+library(broom)
 library(loo)
 library(rstanarm)
 library(rstan)
 
-# library(smooth)
-# library(reshape2)
-# library(hrbrthemes)
-# library(tidyr)
-# library(viridis)
-# library(gridExtra)
-# library(knitr)
-# library(ggthemes)
-# library(nlme)
-# library(MASS)
-# library(ggridges)   # Ridge plots
-# library(ggstance)   # Horizontal pointranges and bars
-# library(patchwork)  # Lay out multiple ggplot plots; install from https://github.com/thomasp85/patchwork
-# library(scales)     # Nicer formatting for numbers
-# library(broom)
+# load data ---------------------------------------------------------------
 
-# define auxilliary functions ---------------------------------------------------------------
-
+# call functions
+source("plotting_functions.r")
+source("theme_functions_MB.r")
 logit <- function(x) log(x/(1-x))
 inv_logit <- function(x) 1/(1+exp(-x))
 sf <- function(x, pub = 0, prob_vect = c(0.5,0.025,0.975), dec_no = 3) { 
   y <- quantile(x, probs=prob_vect)%>% round(dec_no) 
   y[[4]] <- mean(x<0) %>% round(3)
   names(y)[4] <- "p"
- 
+  
   if (y[[4]] > 0.5)  y[[4]] = 1 -  y[[4]]
   
   if (y[[1]] < 0) {
@@ -64,43 +71,178 @@ sf <- function(x, pub = 0, prob_vect = c(0.5,0.025,0.975), dec_no = 3) {
     return(y_text)  
   } }
 
-# load the theme function
-source("theme_functions_MB.r")
 
-# save the unicodes of the parameters for plots
+# save greek letters often used:
+
 my_greeks = c("\U1D714", "\U1D6FE" , "\U1D702")
 
-# load and prepare data ---------------------------------------------------------------
-
+# load data files 
 data_beh <- readRDS(file = "Group Data/data_beh.rds")
 data_group <-readRDS(file = "Group Data/data_group.rds")
 
-data_beh$comt_s = ave(data_beh$comt, FUN = scale)
-data_beh$cag_s = ave(data_beh$cag, FUN = scale)
-data_beh$dat1_c = data_beh$dat1
-contrasts(data_beh$dat1_c) <- c(-1/2,1/2)
-
-
-data_group$comt_s = ave(data_group$comt, FUN = scale)
-data_group$cag_s = ave(data_group$cag, FUN = scale)
-data_group$dat1_c = data_group$dat1
-contrasts(data_group$dat1_c) <- c(-1/2,1/2)
-### prepare data
+# get all subjects
 subjList <- unique(data_group$ID)
 
-# data_beh$comt %>% glimpse()
+```
+
+## Computational modelling
+Testosterone increases noise, but does not decrease model-based compared to model-free behavior
+
+```{r computational model results: fig.width = 12, fig.height = 7, echo=FALSE, warning= FALSE, message=FALSE}
+
+# run the model (this might take time - if you do not have the resources to run this, please contact Nace Mikus (nace.mikus@univie.ac.at)) #####
+source("analysis_main.R") # set parameters in analysis_main.R
+
+if (!file.exists("Model_results/Model_w_admin.rds")) {
+  
+  run_model_fit("Stan scripts/ts_w_admin_lkj.stan", savemodelname = "Model_results/Model_w_admin.rds")
+
+}
+
+# load the model
+fit_model <- readRDS("Model_results/Model_w_admin.rds")
+
+# plot group level posteriors
+
+pars_all <- intersect(grep("^beta", names(fit_model), value = T), grep("^beta1", names(fit_model), value = T, invert = T))
+
+# inspect model
+pairs(fit_model, pars = c('mu_p'))
+# g_m <- stan_plot(fit_model, pars = pars_all, outer_level = 0.95) + theme_Publication(base_size = 10)+
+#   geom_vline(xintercept=0) +
+#   scale_y_discrete(name = "", limits = c("Testosterone on g","Testosterone on MF","Testosterone on MB")) +
+#   scale_x_continuous(name = "Posterior distribution (80% and 95% CrI)")
+post_model <- extract(fit_model, pars = c(pars_all, 'sigma'))
+sigma_w <-  post_model$sigma[,2]
+# sigma_w %>% hist()
+sigma_noise <-  post_model$sigma[,1]
+sigma_g <-  post_model$sigma[,3]
+
+data_stat_model_temp <-  bind_cols(post_model %>% data.frame() %>% transmute(TonMB=(beta_testosterone)/sigma_w,
+                                                                             TonMF=(beta_testosterone_noise)/sigma_noise,
+                                                                             TonG=(beta_testosterone_g)/sigma_g)
+) 
+
+data_stat_model_temp %>% lapply(.,sf, 1) 
+
+data_stat_model = data_stat_model_temp %>% 
+  # convert them to the long format, group, and get the posterior summaries
+  pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  summarise(mean = mean(value),
+            ll   = quantile(value, prob = .025),
+            ul   = quantile(value, prob = .975),
+            lls   = quantile(value, prob = .10),
+            uls   = quantile(value, prob = .90))  # since the `key` variable is really two variables in one, here we split them up
+
+
+# plot!
+g_stats_m <- data_stat_model %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
+  geom_errorbar(aes(xmin = lls, xmax = uls), linewidth = 1.5,color = "firebrick", width = 0)+
+  geom_vline(xintercept = 0, color = "firebrick", alpha = 1/5) +
+  geom_pointrange(color = "firebrick") +
+  labs(x = "Effect sizes (means with 95% and 80% CrI)", y = NULL) +
+  theme_Publication(base_size = 10) +
+  theme(panel.grid = element_blank(),
+        strip.background = element_rect(fill = "transparent", color = "transparent")) +
+  scale_y_discrete(limits = c("TonG", "TonMF", "TonMB"),
+                   labels = c("T - P in value discounting (\U1D6FE)","T - P in decision temperature (\U1D702)","T - P in model-based/model-free weight (\U1D714)"))
+
+
+data_group$w <- get_posterior_mean(fit_model, pars=c('w'))[,5]
+data_group$noise <- get_posterior_mean(fit_model, pars=c('beta1'))[,5]
+data_group$g <- get_posterior_mean(fit_model, pars=c('g'))[,5]
+# data_group$belief_in_T
+data_sum = data_group %>% group_by(admin)%>% summarise(N=n(),
+                                                       mean_w = mean(w),
+                                                       se_w = sd(w)/sqrt(N-1),
+                                                       mean_noise = mean(noise),
+                                                       se_noise = sd(noise)/sqrt(N-1),
+                                                       mean_g = mean(g),
+                                                       se_g = sd(g)/sqrt(N-1))
+# plot model results #### 
+g_w <- ggplot(data = data_group , aes(x = admin, y = logit(w)))+  # group = ID, linetype = Genotype)) 
+  
+  geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+theme_Publication(base_size = 10) +
+  scale_colour_Publication()+scale_fill_Publication()+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.grid.major  = element_blank(),
+        legend.position = "none",
+        legend.title = element_blank()) +
+  ylab(paste0(my_greeks[1]," - Model-based/model-free weight"))+# ylab(expression("\u03C9"[good])) +  
+  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
+# my_greeks
+# g_w + g_legend
+g_legend <- get_legend(ggplot(data = data_group %>% mutate(admin = factor(admin, levels = c("Placebo","Testosterone"), labels = c("Placebo (P)","Testosterone (T)"))), aes(x = admin, y = w)) + 
+                         geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1)+theme_Publication(base_size = 10) +scale_fill_Publication()+
+                         theme(legend.position ="bottom",
+                               legend.key = element_blank(),
+                               legend.title = element_blank())+
+                         scale_colour_Publication())
+# g_legend <- get_legend(g_w +  )
+g_noise <- ggplot(data = data_group, aes(x = admin, y = log(noise)))+  # group = ID, linetype = Genotype)) 
+  # geom_violin(aes(fill = admin))+
+  geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+theme_Publication(base_size = 10) +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.grid.major  = element_blank(),
+        legend.position = "none") +
+  scale_colour_Publication()+scale_fill_Publication()+
+  ylab(paste0(my_greeks[3]," - Decision temperature")) + # ylab(expression("\u03C9"[good])) +  
+  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
+g_noise
+g_gamma <- ggplot(data = data_group, aes(x = admin, y = logit(g)))+  # group = ID, linetype = Genotype)) 
+  # geom_violin(aes(fill = admin))+
+  geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+theme_Publication(base_size = 10) +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.grid.major  = element_blank(),
+        legend.position = "none") +
+  scale_colour_Publication()+scale_fill_Publication()+
+  ylab(paste0(my_greeks[2]," - Value discounting")) +# ylab(expression("\u03C9"[good])) +  
+  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
+
+
+g_model_res <- plot_grid(
+  plot_grid(g_w,g_noise,g_gamma, ncol = 3),
+  g_legend, g_stats_m, ncol = 1, rel_heights = c(1,0.05,0.45))
+g_model_res
+
+# get effect sizes #####
+if (FALSE) {
+  post <- extract(fit_model)  
+  (post$beta_testosterone) %>% sf(1)
+  (post$beta_testosterone/post$sigma[2]) %>% sf(1)
+  
+  (post$beta_testosterone_noise) %>% sf
+  (post$beta_testosterone_noise/post$sigma[1]) %>% sf(1)
+  
+  (post$beta_testosterone_g) %>% sf
+  (post$beta_testosterone_g/post$sigma[3]) %>% sf(1)
+  
+}
 
 
 ```
 
-# Results
+## Behavioural analysis: staying behavior
 
-## Behavioural analysis: How Testosterone affects subjects performance in trials where first states are the same as in the previous trial, compared to those when they are different
+Testosterone affects staying behavior in same first state trial, but not in different first state trials
 
 ```{r staying behavior, fig.width=13,fig.height=10, echo=FALSE, message= FALSE}
 
-## run the model
-if(!file.exists("Brms Models/Brms_stay_beh2.rds")){
+# run the model 
+if(!file.exists("Brms Models/Brms_stay_beh.rds")){
   fit_model_beh <- brm(stay_num|trials(1) ~ (prev_state_diff*prev_points|ID) + admin*prev_points*prev_state_diff,
                  data = data_beh, family = binomial(),
                  prior = c(set_prior("cauchy(0,2)", class = "sd"),
@@ -110,13 +252,16 @@ if(!file.exists("Brms Models/Brms_stay_beh2.rds")){
                  warmup = 1000, iter =3000, chains =4,
                  control = list(adapt_delta = 0.9))
   
-  saveRDS(fit_model_beh, file = "Brms Models/Brms_stay_beh2.rds")
-} else fit_model_beh <- readRDS("Brms Models/Brms_stay_beh2.rds")
+  saveRDS(fit_model_beh, file = "Brms Models/Brms_stay_beh.rds")
+}
 
 
-# get posterior intervals and stats
-if (FALSE) {
+# load the model 
+fit_model_beh <- readRDS("Brms Models/Brms_stay_beh.rds")
 fit_model_beh %>% summary()
+# get regression slopes 
+
+
 post <- fit_model_beh %>% posterior_samples()
 post$b_prev_points %>% exp() %>%  sf(1)
 post$b_prev_points %>%  sf(1)
@@ -127,7 +272,7 @@ post$b_prev_points %>%  sf(1)
 post$`b_prev_points:prev_state_diffdifferent` %>%  sf(1)
 # 
 row1 <- (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`)  %>% sf()
- (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`)  %>% sf(1)
+(post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`)  %>% sf(1)
 row2 <- (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`)  %>% sf()
 (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`)  %>% sf(1)
 row0 <- post$`b_adminTestosterone:prev_points` %>% sf
@@ -135,14 +280,12 @@ post$`b_adminTestosterone:prev_points` %>% sf(1)
 
 # 
 row1 <- (post$`b_adminTestosterone:prev_points`)  %>% sf()
-# post$`b_adminTestosterone:prev_points`
-# row1 %>% data.frame()
-# bind_cols(row1, row2, co)
+
 
 g_stats <- bind_cols(post%>% transmute(T_PP_Same = `b_adminTestosterone:prev_points`,
                                        T_PP_Diff = `b_adminTestosterone:prev_points` + `b_adminTestosterone:prev_points:prev_state_diffdifferent`,
                                        T_PP_Diff_Same = `b_adminTestosterone:prev_points:prev_state_diffdifferent`)
-
+                     
 ) %>% 
   # convert them to the long format, group, and get the posterior summaries
   pivot_longer(everything()) %>%
@@ -152,7 +295,7 @@ g_stats <- bind_cols(post%>% transmute(T_PP_Same = `b_adminTestosterone:prev_poi
             ul   = quantile(value, prob = .975),
             lls   = quantile(value, prob = .25),
             uls   = quantile(value, prob = .75)) %>%  # since the `key` variable is really two variables in one, here we split them up
- 
+  
   
   # plot!
   ggplot(aes(x = mean, xmin = ll, xmax = ul, y = name)) +
@@ -164,14 +307,9 @@ g_stats <- bind_cols(post%>% transmute(T_PP_Same = `b_adminTestosterone:prev_poi
   theme(panel.grid = element_blank(),
         strip.background = element_rect(fill = "transparent", color = "transparent")) +
   scale_y_discrete(limits = rev(c("T_PP_Same", "T_PP_Diff", "T_PP_Diff_Same")),
-                     labels = rev(c("T - P Same first state", "T - P Different first state","T - P Different - Same first state" )))
+                   labels = rev(c("T - P Same first state", "T - P Different first state","T - P Different - Same first state" )))
 
 
-
-
-}
-
-# Staying plot ---------------------------------------------------------------------
 
 
 data_same <- data_beh %>% filter(!is.na(stay), prev_state_diff == "same")%>% mutate(admin = factor(admin, levels = c("Placebo", "Testosterone"),  labels = c("Placebo (P)", "Testosterone (T)")))  %>% 
@@ -203,26 +341,41 @@ g_same <- pred_data%>% mutate(admin = factor(admin, levels = c("Placebo", "Testo
   geom_ribbon(aes(ymin = Q10, ymax = Q90), alpha = 0.5, fill = "grey70") + 
   scale_colour_Publication()+
   geom_line(aes(colour = admin)) + theme_Publication(base_size = 10) + ylim(c(0.15,1)) + 
- 
+  
   theme(legend.position = "none",  axis.text.x = element_blank(),axis.ticks = element_blank())+ 
   xlab("Previous Points")+  ylab("P(stay) after \nsame first state")
- g_stay <- plot_grid(
+g_stay <- plot_grid(
   plot_grid(g_same, g_different, nrow =1),
   g_stats,
   ncol = 1,
   rel_heights = c(1,0.5))
 
- g_stay
+g_stay
+
+
+
+# look at how random slopes of previous point effects relate to model paramters ####
+
+rand_slopes = fit_model_beh %>% ranef()
+cor.test(rand_slopes$ID[,1,3], log(data_group$noise))
+cor.test(rand_slopes$ID[,1,4], data_group$w)
+cor.test(rand_slopes$ID[,1,4], log(data_group$noise))
+  
+data_group$rand_slopes_same = rand_slopes$ID[,1,3]
+data_group$rand_slopes_diff_same = rand_slopes$ID[,1,4]
+lm(data= data_group ,rand_slopes_same ~ w + g + log(noise) ) %>% summary()
+lm(data= data_group ,rand_slopes_diff_same ~ w + g + log(noise) ) %>% summary()
 ```
 
-## Testosterone's effects on overall points
+## Behavioural analysis of points earned 
+
 
 ```{r earn behavior,fig.width=12, echo=FALSE, message= FALSE}
-# run earn model
 
-if(!file.exists("Brms Models/Brms_points_gen.rds")){
+# run the model
+if(!file.exists("Brms Models/Brms_points.rds")){
   cat("running the points model\n")
-  fit_model_earn <- brm(points ~ (prev_state_diff|ID) + admin*(dat1_c+comt_s+cag_s)*prev_state_diff,
+  fit_model_earn <- brm(points ~ (prev_state_diff|ID) + admin*prev_state_diff,
                  data = data_beh,
                  prior = c(set_prior("cauchy(0,2)", class = "sd"),
                            set_prior("normal(0,3)", class = "b"),
@@ -231,12 +384,14 @@ if(!file.exists("Brms Models/Brms_points_gen.rds")){
                  warmup = 1000, iter =3000, chains =4,
                  control = list(adapt_delta = 0.9))
   
-  saveRDS(fit_model_earn, file = "Brms Models/Brms_points_gen.rds")
-} else fit_model_earn <- readRDS("Brms Models/Brms_points.rds")
+  saveRDS(fit_model_earn, file = "Brms Models/Brms_points.rds")
+}
+# load the model
+fit_model_earn <- readRDS("Brms Models/Brms_points.rds")
 
-# get model posteriors 
-if (FALSE) {
 fit_model_earn %>% summary()
+
+# get effect sizes and plots #####
 post_earn <- posterior_samples(fit_model_earn)
 
 post_earn <- post_earn %>% mutate(sd_total_earn = sqrt(sigma^2 + sd_ID__Intercept^2 + sd_ID__prev_state_diffdifferent^2))
@@ -254,10 +409,7 @@ post_earn$b_adminTestosterone %>% sf(1)
 # effect size 
 ((post_earn$`b_adminTestosterone:prev_state_diffdifferent`)/post_earn$sd_total_earn) %>% sf(1)
 
-
-}
-
-# plot earning ---------------------------------------------------------------
+# plot posteriors from the model   
 new_data = fitted(fit_model_earn, re_formula = NA, probs = c(.025, .975, .25, .75))
 
 # fitted(b5.5, 
@@ -285,12 +437,13 @@ g_earn <- ggplot(data = new_data, aes(x = admin, y = Estimate, group = admin)) +
 
 
 g_earn 
- 
 ```
 
-## Testosterone's effects on overall reaction times
+## Behavioural analysis of reaction times 
 
 ```{r rts}
+
+# running the model 
 
 if(!file.exists("Brms Models/Brms_rt.rds")){
   cat("running the points model\n")
@@ -304,27 +457,27 @@ if(!file.exists("Brms Models/Brms_rt.rds")){
                  control = list(adapt_delta = 0.9))
   
   saveRDS(Brms_rt, file = "Brms Models/Brms_rt.rds")
-} else Brms_rt <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Brms Models/Brms_rt.rds")
-  
-# get posteriors 
-if (FALSE) {
-    Brms_rt%>% summary()
-  
-  post_rt <- posterior_samples(Brms_rt)
-  post_rt <- post_rt %>% mutate(sd_total_rt = sqrt(sigma^2 + sd_ID__Intercept^2 + sd_ID__prev_state_diffdifferent^2))
-  
-  (post_rt$b_adminTestosterone) %>% sf(1)
-   ((post_rt$b_adminTestosterone)/post_rt$sd_total) %>% sf(1)
-  (post_rt$b_adminTestosterone >0) %>% mean()
-  
-  
-  ((post_rt$b_adminTestosterone + post_rt$`b_adminTestosterone:prev_state_diffdifferent`)/sd_total) %>% sf()
-  (post_rt$b_adminTestosterone + post_rt$`b_adminTestosterone:prev_state_diffdifferent`>0) %>% mean()
-  
 }
 
+# load the model
+Brms_rt <- readRDS("Brms Models/Brms_rt.rds")
 
-# plot reaction times -------------------------------------------------------------------
+Brms_rt%>% summary()
+
+#get effect sizes and plots 
+
+post_rt <- posterior_samples(Brms_rt)
+post_rt <- post_rt %>% mutate(sd_total_rt = sqrt(sigma^2 + sd_ID__Intercept^2 + sd_ID__prev_state_diffdifferent^2))
+
+(post_rt$b_adminTestosterone) %>% sf(1)
+((post_rt$b_adminTestosterone)/post_rt$sd_total) %>% sf(1)
+(post_rt$b_adminTestosterone >0) %>% mean()
+
+
+((post_rt$b_adminTestosterone + post_rt$`b_adminTestosterone:prev_state_diffdifferent`)/post_rt$sd_total_rt) %>% sf()
+(post_rt$b_adminTestosterone + post_rt$`b_adminTestosterone:prev_state_diffdifferent`>0) %>% mean()
+
+
 
 data_rt1 <- data_beh %>% filter(rt1 > 200, !is.na(prev_state_diff))%>%
   
@@ -352,7 +505,7 @@ g_rt <- ggplot(data = new_data_rt, aes(x = admin, y = Estimate, group = admin)) 
   geom_errorbar(aes(ymin = Q25, ymax = Q75), width=0, position = position_dodge(0.9), size =2) +
   geom_point(aes(colour = admin), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
   # geom_jitter(data  =data_earn, aes(x=admin, y=log_rt), size = 0.2) + 
-  facet_wrap(~prev_state_diff) + theme_Publication(base_size = 10) + theme(legend.position = "none") + xlab("") +ylab("Reaction Times (log scale)") +scale_x_discrete(labels = c("P", "T" ))+
+  facet_wrap(~prev_state_diff) + theme_Publication(base_size = 10) + theme(legend.position = "none") + xlab("") +ylab("Reaction Times (log ms)") +scale_x_discrete(labels = c("P", "T" ))+
   scale_colour_Publication()
 
 # g_stat_earn <- mcmc_plot(fit_model_earn, pars = "^b_")
@@ -389,200 +542,59 @@ g_stats_rt_earn <- bind_cols(post_earn %>% transmute(T_Earn_Same = b_adminTestos
   geom_errorbar(aes(xmin = lls, xmax = uls), size = 1.5,color = "firebrick", width = 0)+
   geom_vline(xintercept = 0, color = "firebrick", alpha = 1/5) +
   geom_pointrange(color = "firebrick") +
-  labs(subtitle = "Total effect sizes of testosterone effects on points and reaction times",x = "Posterior distribution (95% and 50% CrI)", y = NULL) +
+  labs(subtitle = "Effect sizes of testosterone effects on points and reaction times",x = "Posterior distribution (95% and 50% CrI)", y = NULL) +
   theme_Publication(base_size = 10) +
   theme(panel.grid = element_blank(),
         strip.background = element_rect(fill = "transparent", color = "transparent"),
         plot.subtitle = element_text(size = 14)) +
   scale_y_discrete(limits = c("T_RT_Diff", "T_RT_Same", "T_Earn_Diff", "T_Earn_Same"),
-                   labels = c("Reaction times when frist state different", "Reaction times when frist state same", "Avg points per trial when frist state different", "Avg points per trial when frist state same"))
-plot_grid(g_earn_rt,
-          g_stats_rt_earn, ncol = 1, rel_heights = c(1,0.4))
+                   labels = c("Reaction times when first state different", "Reaction times when first state same", "Avg points per trial when first state different", "Avg points per trial when first state same"))
+plot_grid( plot_grid(g_earn, g_rt, labels = c("a","b")),
+           g_stats_rt_earn, ncol = 1, rel_heights = c(1,0.4))
 
 
 
-
-
-```
-
-## Computational modelling of testosterone's effects on the weight on model-free and  model-based learning
-
-```{r computational model results: plot best investment model,fig.width = 12, fig.height = 7, echo=FALSE, warning= FALSE, message=FALSE}
-
-## first run the model 
-
-# load the wrapper function 
-source("analysis_main.r")
-
-# run the model 
-
-run_model_fit("Stan scripts/ts_w_admin_lkj.stan", "Model_results/Model_w_admin.rds")
-
-fit_model <- readRDS("Model_results/Model_w_admin.rds")
-
-
-# get a glimpse 
-pars_all <- intersect(grep("^beta", names(fit_model), value = T), grep("^beta1", names(fit_model), value = T, invert = T))
-
-g_m <- stan_plot(fit_model, pars = pars_all, outer_level = 0.95) + theme_Publication(base_size = 10)+
-  geom_vline(xintercept=0) +
-  scale_y_discrete(name = "", limits = c("Testosterone on g","Testosterone on MF","Testosterone on MB")) +
-  scale_x_continuous(name = "Posterior distribution (80% and 95% CrI)")
-
-# get posteriors 
-
-post_model <- extract(fit_model, pars = c(pars_all, 'sigma'))
-sigma_w <-  post_model$sigma[,2]
-# sigma_w %>% hist()
-sigma_noise <-  post_model$sigma[,1]
-sigma_g <-  post_model$sigma[,3]
-
-data_stat_model_temp <-  bind_cols(post_model %>% data.frame() %>% transmute(TonMB=(beta_testosterone)/sigma_w,
-                                                                         TonMF=(beta_testosterone_noise)/sigma_noise,
-                                                                             TonG=(beta_testosterone_g)/sigma_g)
-) 
-
-data_stat_model_temp %>% lapply(.,sf, 1) 
-
-data_stat_model = data_stat_model_temp %>% 
-  # convert them to the long format, group, and get the posterior summaries
-  pivot_longer(everything()) %>% 
-  group_by(name) %>% 
-  summarise(mean = mean(value),
-            ll   = quantile(value, prob = .025),
-            ul   = quantile(value, prob = .975),
-            lls   = quantile(value, prob = .10),
-            uls   = quantile(value, prob = .90))  # since the `key` variable is really two variables in one, here we split them up
- 
-  
-  # plot!
-  g_stats_m <- data_stat_model %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
-  geom_errorbar(aes(xmin = lls, xmax = uls), linewidth = 1.5,color = "firebrick", width = 0)+
-  geom_vline(xintercept = 0, color = "firebrick", alpha = 1/5) +
-  geom_pointrange(color = "firebrick") +
-  labs(x = "Effect sizes (means with 95% and 80% CrI)", y = NULL) +
-  theme_Publication(base_size = 10) +
-  theme(panel.grid = element_blank(),
-        strip.background = element_rect(fill = "transparent", color = "transparent")) +
-  scale_y_discrete(limits = c("TonG", "TonMF", "TonMB"),
-                   labels = c("T - P in value discounting (\U1D6FE)","T - P in decision temperature (\U1D702)","T - P in model-based/model-free weight (\U1D714)"))
-
-
-data_group$w <- get_posterior_mean(fit_model, pars=c('w'))[,5]
-data_group$noise <- get_posterior_mean(fit_model, pars=c('beta1'))[,5]
-data_group$g <- get_posterior_mean(fit_model, pars=c('g'))[,5]
-# data_group$belief_in_T
-data_sum = data_group %>% group_by(admin)%>% summarise(N=n(),
-                                                       mean_w = mean(w),
-                                                       se_w = sd(w)/sqrt(N-1),
-                                                       mean_noise = mean(noise),
-                                                       se_noise = sd(noise)/sqrt(N-1),
-                                                       mean_g = mean(g),
-                                                       se_g = sd(g)/sqrt(N-1))
-
-
-# plot box plots for modelling results figure
-
-g_w <- ggplot(data = data_group , aes(x = admin, y = logit(w)))+  # group = ID, linetype = Genotype)) 
-  
-  geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
-   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
-  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+theme_Publication(base_size = 10) +
-  scale_colour_Publication()+scale_fill_Publication()+
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        panel.grid.major  = element_blank(),
-        legend.position = "none",
-        legend.title = element_blank()) +
-  ylab(paste0(my_greeks[1]," - Model-based/model-free weight"))+# ylab(expression("\u03C9"[good])) +  
-  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-# my_greeks
-# g_w + g_legend
-g_legend <- get_legend(ggplot(data = data_group %>% mutate(admin = factor(admin, levels = c("Placebo","Testosterone"), labels = c("Placebo (P)","Testosterone (T)"))), aes(x = admin, y = w)) + 
-                         geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1)+theme_Publication(base_size = 10) +scale_fill_Publication()+
-                         theme(legend.position ="bottom",
-                                legend.key = element_blank(),
-                               legend.title = element_blank())+
-                         scale_colour_Publication())
-# g_legend <- get_legend(g_w +  )
-g_noise <- ggplot(data = data_group, aes(x = admin, y = log(noise)))+  # group = ID, linetype = Genotype)) 
-  # geom_violin(aes(fill = admin))+
- geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
-   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
-  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+theme_Publication(base_size = 10) +
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        panel.grid.major  = element_blank(),
-        legend.position = "none") +
-  scale_colour_Publication()+scale_fill_Publication()+
-  ylab(paste0(my_greeks[3]," - Decision temperature")) + # ylab(expression("\u03C9"[good])) +  
-  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-g_noise
-g_gamma <- ggplot(data = data_group, aes(x = admin, y = logit(g)))+  # group = ID, linetype = Genotype)) 
-  # geom_violin(aes(fill = admin))+
- geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
-   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
-  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+theme_Publication(base_size = 10) +
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        panel.grid.major  = element_blank(),
-        legend.position = "none") +
-  scale_colour_Publication()+scale_fill_Publication()+
-  ylab(paste0(my_greeks[2]," - Value discounting")) +# ylab(expression("\u03C9"[good])) +  
-  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-
-
-g_model_res <- plot_grid(
-  plot_grid(g_w,g_noise,g_gamma, ncol = 3),
-  g_legend, g_stats_m, ncol = 1, rel_heights = c(1,0.05,0.45))
-g_model_res
-
-# get posteriors of effect sizes 
-if (FALSE) {
-  post <- extract(fit_model)  
-  (post$beta_testosterone) %>% sf(1)
-   (post$beta_testosterone/post$sigma[2]) %>% sf(1)
-  
-   (post$beta_testosterone_noise) %>% sf
-   (post$beta_testosterone_noise/post$sigma[1]) %>% sf(1)
-
-   (post$beta_testosterone_g) %>% sf
-   (post$beta_testosterone_g/post$sigma[3]) %>% sf(1)
-  
-}
 
 
 ```
 
 ## Genetics
-
+Accounting for baseline variation in genetic polymorphisms related to dopamine and androgen receptors
 
 ```{r genetics results}
+# scale genetic variables 
 
-# run the model 
-run_model_fit("Stan scripts/ts_w_admin_lkj_gen.stan", "Model_results/Model_w_gen.rds")
-# load model
-M_gen_new <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Model_results/M_w_gen.rds")
+data_beh$comt_s = ave(data_beh$comt, FUN = scale)
+data_beh$cag_s = ave(data_beh$cag, FUN = scale)
+data_beh$dat1_c = data_beh$dat1
+contrasts(data_beh$dat1_c) <- c(-1/2,1/2)
 
-# glimpse results 
-pars_all <- grep("^beta", names(M_gen_new), value = T)  
-  pars_all <- pars_all[!grepl("mix",pars_all)]
+# run the model (this might take time - if you do not have the resources to run this, please contact Nace Mikus (nace.mikus@univie.ac.at)) #####
+
+if (!file.exists("Model_results/M_w_gen.rds")) {
   
+  run_model_fit("Stan scripts/ts_w_admin_lkj_gen.stan", savemodelname = "Model_results/M_w_gen.rds")
+
+}
+M_gen_new <- readRDS("Model_results/M_w_gen.rds")
+pars_all <- grep("^beta", names(M_gen_new), value = T)  
+pars_all <- pars_all[!grepl("mix",pars_all)]
+
 g_m_gen <- stan_plot(M_gen_new, pars = pars_all, outer_level = 0.95) + theme_Publication(base_size = 10)+
   geom_vline(xintercept=0) + 
-  geom_vline(xintercept=0.1, colour = "red", size = 0.3) +
- geom_vline(xintercept=-0.1, colour = "red", size = 0.3) +# labs(subtitle = "80% and 95% CI") +
-  geom_rect(aes(xmin=-0.1,xmax=0.1, ymin=-Inf,ymax=Inf),fill="grey70",colour=NA,alpha=0.05) +
+  # geom_vline(xintercept=0.1, colour = "red", size = 0.3) +
+  # geom_vline(xintercept=-0.1, colour = "red", size = 0.3) +# labs(subtitle = "80% and 95% CI") +
+  # geom_rect(aes(xmin=-0.1,xmax=0.1, ymin=-Inf,ymax=Inf),fill="grey70",colour=NA,alpha=0.05) +
   # scale_y_discrete(name = "") + limits = c("Testosterone on g","Testosterone on MF","Testosterone on MB")) +
-  scale_x_continuous(name = "Posterior distribution", breaks = c(-1,-0.1,0.1,1)) + ylab("") 
-  
-g_m_gen
-  
+  scale_x_continuous(name = "Group level effects", breaks = c(-1,-0.1,0.1,1)) + ylab("") 
 
-# plot results 
+g_m_gen
+# pca on the genetics variables
+
+```
+
+```{r genetics and computational parameters}
+
 
 data_group_gen <- data_group
 data_group_gen$w <- get_posterior_mean(fit_model_gen, pars=c('w'))[,5]
@@ -590,26 +602,105 @@ data_group_gen$noise <- get_posterior_mean(fit_model_gen, pars=c('noise'))[,5]
 data_group_gen$g <- get_posterior_mean(fit_model_gen, pars=c('g'))[,5]
 
 post_gen <- extract(fit_model_gen, pars = c(pars_all_gen, 'sigma', 'mu_p'))
+if (FALSE){
+  g_w_comt <- data_group_gen %>% mutate(w = logit(w),
+                                        noise = log(noise),
+                                        g = logit(g)) %>% group_by(admin,comt_f)%>% summarise(N=n(),
+                                                                                              mean_w = mean(w),
+                                                                                              se_w = sd(w)/sqrt(N),
+                                                                                              mean_noise = mean(noise),
+                                                                                              se_noise = sd(noise)/sqrt(N),
+                                                                                              mean_g = mean(g),
+                                                                                              se_g = sd(g)/sqrt(N)) %>%  
+    
+    
+    ggplot(aes(x = admin, y = mean_w, fill = admin)) +  # group = ID, linetype = Genotype)) 
+    geom_errorbar(aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0, size  = 1.5)+
+    # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+    #  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+    # # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
+    # geom_point(data = data_group_gen, aes(fill = admin, y=logit(w)),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.5)+theme_Publication(base_size = 10) +
+    geom_point(position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
+    # geom_violin(aes(fill = admin), alpha = 0.5)+
+    # 
+    # geom_violin(aes(fill = admin))+
+    # geom_boxplot(aes(fill = admin), width=0.5, color="black")+
+    # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
+    # geom_jitter(data = data_group_gen, aes(y=logit(w)), size = 0.1) +
+    scale_colour_Publication()+scale_fill_Publication()+
+    theme_Publication(base_size = 10) +
+    theme(axis.ticks.x = element_blank(),
+          axis.text.x = element_blank(),
+          panel.grid.major  = element_blank(),
+          legend.position = "right",
+          legend.title = element_blank()) +
+    ylab(expression("Weight on MB value"))+ 
+    scale_colour_Publication()+
+    xlab("COMT polymorphism")  + facet_wrap(~comt_f) 
+  
+  
+  data_group_cl <- data_group_gen %>% mutate(w_t = logit(w),
+                                             noise_t = log(noise),
+                                             g_t = logit(g)) %>% group_by(admin,Gen_cluster)%>% summarise(N=n(),
+                                                                                                          mean_w = mean(w_t),
+                                                                                                          se_w = sd(w_t)/sqrt(N),
+                                                                                                          mean_noise = mean(noise_t),
+                                                                                                          se_noise = sd(noise_t)/sqrt(N),
+                                                                                                          mean_g = mean(g_t),
+                                                                                                          se_g = sd(g_t)/sqrt(N))
+  
+  g_w_comt <- data_group_cl %>%  
+    ggplot(aes(x = admin, y = mean_w, fill = admin)) +  # group = ID, linetype = Genotype)) 
+    geom_errorbar(aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0, size  = 1.5)+
+    geom_point(position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
+    scale_colour_Publication()+scale_fill_Publication()+
+    theme_Publication(base_size = 10) +
+    theme(axis.ticks.x = element_blank(),
+          axis.text.x = element_blank(),
+          panel.grid.major  = element_blank(),
+          legend.position = "none",
+          legend.title = element_blank()) +
+    ylab(paste0("MB/MF weight (",my_greeks[1], ")"))+ 
+    xlab("COMT polymorphism")  + facet_wrap(~Gen_cluster) 
+  g_noise_comt <- data_group_cl %>%  
+    ggplot(aes(x = admin, y = mean_noise, fill = admin)) +  # group = ID, linetype = Genotype)) 
+    geom_errorbar(aes(x= admin, y = mean_noise, ymin = mean_noise - se_noise, ymax = mean_noise + se_noise), width = 0, size  = 1.5)+
+    geom_point(position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
+    scale_colour_Publication()+scale_fill_Publication()+
+    theme_Publication(base_size = 10) +
+    theme(axis.ticks.x = element_blank(),
+          axis.text.x = element_blank(),
+          panel.grid.major  = element_blank(),
+          legend.position = "none",
+          legend.title = element_blank()) +
+    ylab(paste0(" (",my_greeks[1], ")"))+ 
+    xlab("COMT polymorphism")  + facet_wrap(~Gen_cluster) 
+  g_w_comt + g_noise_comt
+  
+  
+}
+
+
 
 data_group_comt <- data_group_gen %>% mutate(w_t = logit(w),
-                                      noise_t = log(noise),
-                                      g_t = logit(g)) %>% group_by(admin,comt_f)%>% summarise(N=n(),
-                                                                      mean_w = mean(w_t),
-                                                                      se_w = sd(w_t)/sqrt(N-1),
-                                                                      mean_noise = mean(noise_t),
-                                                                      se_noise = sd(noise_t)/sqrt(N-1),
-                                                                      mean_g = mean(g_t),
-                                                                      se_g = sd(g_t)/sqrt(N-1))
+                                             noise_t = log(noise),
+                                             g_t = logit(g)) %>% group_by(admin,comt_f)%>% summarise(N=n(),
+                                                                                                     mean_w = mean(w_t),
+                                                                                                     se_w = sd(w_t)/sqrt(N-1),
+                                                                                                     mean_noise = mean(noise_t),
+                                                                                                     se_noise = sd(noise_t)/sqrt(N-1),
+                                                                                                     mean_g = mean(g_t),
+                                                                                                     se_g = sd(g_t)/sqrt(N-1))
 
 g_w_comt <- ggplot(data = data_group_gen, aes(x = admin, y = logit(w)))+  # group = ID, linetype = Genotype)) 
   # geom_violin(aes(fill = admin))+
- # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
- 
-   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  
+  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
   # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+
-    geom_errorbar(data =data_group_comt, aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0, size  = 1.5)+
-    geom_point(data =data_group_comt,aes(fill= admin, y = mean_w), position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+
+  geom_errorbar(data =data_group_comt, aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0, size  = 1.5)+
+  geom_point(data =data_group_comt,aes(fill= admin, y = mean_w), position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
   theme_Publication(base_size = 10) +
   theme(axis.ticks.x = element_blank(),
         axis.text.x = element_blank(),
@@ -626,6 +717,26 @@ data_group_gen$cag_f <- 0
 data_group_gen$cag_f[data_group_gen$cag_s >= 0] <- 1
 data_group_gen$cag_f[data_group_gen$cag_s < 0] <- -1
 data_group_gen$cag_f <- factor(data_group_gen$cag_f, levels = c(-1,1), labels = c("low cag\nrepeats", "high cag\nrepeats"))
+
+# data_group_gen$cag_f <- factor(data_group_gen$cag_f, levels = c(-1,0,1), labels = c("low (< 1 SD) cag\nrepeats", "average cag\nrepeates", "high (> 1 SD) cag\nrepeats"))
+
+# g_w_cag <- data_group_gen %>% 
+#   ggplot(aes(x = cag_s, y = w, group = admin))+  # group = ID, linetype = Genotype)) 
+#   geom_abline(aes(x= cag_s, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0,size = 2)+
+#   geom_point(aes(x=cag_s, y = w, colour = admin), size = 3) +
+#   # 
+#   # geom_violin(aes(fill = admin))+
+#   # geom_boxplot(aes(fill = admin), width=0.5, color="black")+
+#   # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
+#   # geom_jitter(data = data_group_gen, size = 0.1) +  
+#   theme_Publication(base_size = 10) +
+#   theme(axis.ticks.x = element_blank(),
+#         axis.text.x = element_blank(),
+#         panel.grid.major  = element_blank(),
+#         legend.position = "none") +
+#   ylab(expression("Weight on MB value"))+ ylim(c(0,0.3)) + 
+#   
+#   xlab("CAG polymorphism")  + facet_wrap(~cag_f) 
 
 g_w_cag <- data_group_gen %>% 
   ggplot(aes(x = cag_s, y = logit(w), colour = admin, fill = admin))+  # group = ID, linetype = Genotype)) 
@@ -644,25 +755,25 @@ g_w_cag #+ theme(legend.position = "none")
 
 # data_group_gen$dat1 %>% glimpse()
 data_group_dat1 <- data_group_gen %>% mutate(w_t = logit(w),
-                                      noise_t = log(noise),
-                                      g_t = logit(g)) %>% group_by(admin,dat1)%>% summarise(N=n(),
-                                                                      mean_w = mean(w_t),
-                                                                      se_w = sd(w_t)/sqrt(N-1),
-                                                                      mean_noise = mean(noise_t),
-                                                                      se_noise = sd(noise_t)/sqrt(N-1),
-                                                                      mean_g = mean(g_t),
-                                                                      se_g = sd(g_t)/sqrt(N-1))
-  
- 
+                                             noise_t = log(noise),
+                                             g_t = logit(g)) %>% group_by(admin,dat1)%>% summarise(N=n(),
+                                                                                                   mean_w = mean(w_t),
+                                                                                                   se_w = sd(w_t)/sqrt(N-1),
+                                                                                                   mean_noise = mean(noise_t),
+                                                                                                   se_noise = sd(noise_t)/sqrt(N-1),
+                                                                                                   mean_g = mean(g_t),
+                                                                                                   se_g = sd(g_t)/sqrt(N-1))
+
+
 g_noise_dat1 <- ggplot(data = data_group_gen, aes(x = admin, y = log(noise)))+  # group = ID, linetype = Genotype)) 
   # geom_violin(aes(fill = admin))+
- # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
- 
-   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  
+  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
   # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+
-    geom_errorbar(data =data_group_dat1, aes(x= admin, y = mean_noise, ymin = mean_noise - se_noise, ymax = mean_noise + se_noise), width = 0, size  = 1.5)+
-    geom_point(data =data_group_dat1,aes(fill= admin, y = mean_noise), position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+
+  geom_errorbar(data =data_group_dat1, aes(x= admin, y = mean_noise, ymin = mean_noise - se_noise, ymax = mean_noise + se_noise), width = 0, size  = 1.5)+
+  geom_point(data =data_group_dat1,aes(fill= admin, y = mean_noise), position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
   theme_Publication(base_size = 10) +
   theme(axis.ticks.x = element_blank(),
         axis.text.x = element_blank(),
@@ -675,24 +786,30 @@ g_noise_dat1 <- ggplot(data = data_group_gen, aes(x = admin, y = log(noise)))+  
 g_noise_dat1
 
 
-
-# get posteriors of effect sizes 
-
+#collect comt data 
+# data_beh$comt_s %>% unique()
+# 1.32431597 -0.04435508 -1.41302614
+# COMT_ValVal=post_gen$beta_testosterone_w -1.41*post_gen$beta_comt_testosterone_w
+# post_gen <- post_gen %>% data.frame() %>% mutate(sd_total_gen = ´sigma[1]´)
 sd_total_gen<-  post_gen$sigma[,2]
 sd_total_gen_noise<-  post_gen$sigma[,1]
 
-data_stat_gen_temp <-  bind_cols(post_gen %>% data.frame() %>% transmute(   Dat1_effect_T_P =(beta_dat1_testosterone_noise)/sd_total_gen,
-                                                                   Dat1_effect_T_9r =(post$beta_testosterone_noise - 1/2*post$beta_dat1_testosterone_noise)/sd_total_gen,
-                                                                   Dat1_effect_T_others =(post$beta_testosterone_noise + 1/2*post$beta_dat1_testosterone_noise)/sd_total_gen,
-                                                                   COMT_slope_T_P = (beta_comt_testosterone_w),
-                                                                   COMT_slope_P = (beta_comt_w),
-                                                                   COMT_slope_T=(beta_comt_w + beta_comt_testosterone_w)/sd_total_gen,
-                                                                   Cag_slope_T_P = beta_cag_testosterone_w,
-                                                                   Cag_slope_P = beta_cag_w,
-                                                                   Cag_slope_T = beta_cag_w + 1*beta_cag_testosterone_w)
+data_stat_gen_temp <-  bind_cols(post_gen %>% data.frame() %>% transmute(Dat1xTeffect =(beta_dat1_testosterone_noise)/sd_total_gen,
+                                                                         Dat1_effect_T_9r =(beta_testosterone_noise - 1/2*beta_dat1_testosterone_noise)/sd_total_gen,
+                                                                         Dat1_effect_T_others =(beta_testosterone_noise + 1/2*beta_dat1_testosterone_noise)/sd_total_gen,
+                                                                         # COMT_slope_T_P = (beta_comt_testosterone_w),
+                                                                         # COMT_slope_P = (beta_comt_w),
+                                                                         # COMT_slope_T=(beta_comt_w + beta_comt_testosterone_w)/sd_total_gen,
+                                                                         COMT_MM = (beta_testosterone_w  - 1.41*beta_comt_testosterone_w)/sd_total_gen,
+                                                                         COMT_VM = (beta_testosterone_w -0.04*beta_comt_testosterone_w)/sd_total_gen,
+                                                                         COMT_VV =(beta_testosterone_w +  1.32*beta_comt_testosterone_w)/sd_total_gen,
+                                                                         
+                                                                         Cag_slope_T_P = beta_cag_testosterone_w,
+                                                                         Cag_slope_P = beta_cag_w,
+                                                                         Cag_slope_T = beta_cag_w + 1*beta_cag_testosterone_w)
 )
 data_stat_gen = data_stat_gen_temp %>% 
-
+  
   # convert them to the long format, group, and get the posterior summaries
   pivot_longer(everything()) %>% 
   group_by(name) %>% 
@@ -701,29 +818,29 @@ data_stat_gen = data_stat_gen_temp %>%
             ul   = quantile(value, prob = .975),
             lls   = quantile(value, prob = .10),
             uls   = quantile(value, prob = .90))  # since the `key` variable is really two variables in one, here we split them up
- 
-  
-  # plot!
-  g_stats_gen_mb_comt <- data_stat_gen %>% filter(grepl("COMT", data_stat_gen$name ,fixed=TRUE))  %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
+
+
+# plot!
+g_stats_gen_mb_comt <- data_stat_gen %>% filter(grepl("COMT", data_stat_gen$name ,fixed=TRUE))  %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
   geom_errorbar(aes(xmin = lls, xmax = uls), size = 1.5,color = "firebrick", width = 0)+
   geom_vline(xintercept = 0, color = "firebrick", alpha = 1/5) +
   geom_pointrange(color = "firebrick") +
-  labs(subtitle = paste0("COMT effects on ", my_greeks[1]))+
+  labs(subtitle = paste0("T and COMT interaction effects on ", my_greeks[1]))+
   theme_Publication(base_size = 10) +
   theme(axis.title.x =  element_blank(),
         axis.title.y =  element_blank(),
         panel.grid = element_blank(),
         strip.background = element_rect(fill = "transparent", color = "transparent")) +
-  scale_y_discrete(limits = rev(c("COMT_slope_T", "COMT_slope_P", "COMT_slope_T_P")),
-                   labels = rev(c("COMT slope in T", "COMT slope in P", "COMT slope T-P")))
+  scale_y_discrete(limits = rev(c("COMT_MM", "COMT_VM", "COMT_VV")),
+                   labels = rev(c("T in MetMet", "T in ValMet", "T in ValVal")))
 
 
-  g_stats_gen_mb_cag <- data_stat_gen %>% filter(grepl("Cag", data_stat_gen$name ,fixed=TRUE)) %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
+g_stats_gen_mb_cag <- data_stat_gen %>% filter(grepl("Cag", data_stat_gen$name ,fixed=TRUE)) %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
   geom_errorbar(aes(xmin = lls, xmax = uls), size = 1.5,color = "firebrick", width = 0)+
   geom_vline(xintercept = 0, color = "firebrick", alpha = 1/5) +
   geom_pointrange(color = "firebrick") +
   theme_Publication(base_size = 10) +
-    labs(subtitle = paste0("CAG effects on ", my_greeks[1]))+
+  labs(subtitle = paste0("CAG effects on ", my_greeks[1]))+
   theme(axis.title.x =  element_blank(),
         axis.title.y =  element_blank(),
         panel.grid = element_blank(),
@@ -731,17 +848,17 @@ data_stat_gen = data_stat_gen_temp %>%
   scale_y_discrete(limits = c("Cag_slope_T_P", "Cag_slope_P", "Cag_slope_T"),
                    labels = c("CAG slope T-P", "CAG slope in P", "CAG slope T"))
 
-  g_stats_gen_noise_dat1 <- data_stat_gen %>% filter(grepl("Dat", data_stat_gen$name ,fixed=TRUE)) %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
+g_stats_gen_noise_dat1 <- data_stat_gen %>% filter(grepl("Dat", data_stat_gen$name ,fixed=TRUE)) %>% ggplot(aes(x =mean , xmin = ll, xmax = ul, y = name)) +
   geom_errorbar(aes(xmin = lls, xmax = uls), size = 1.5,color = "firebrick", width = 0)+
   geom_vline(xintercept = 0, color = "firebrick", alpha = 1/5) +
   geom_pointrange(color = "firebrick") +
-   labs(subtitle = paste0("DAT1 effects on ", my_greeks[3]))+
+  labs(subtitle = paste0("T and DAT1 interaction effects on ", my_greeks[3]))+
   theme_Publication(base_size = 10) +
   theme(axis.title.x =  element_blank(),
         axis.title.y =  element_blank(),
         panel.grid = element_blank(),
         strip.background = element_rect(fill = "transparent", color = "transparent")) +
-  scale_y_discrete(limits = c("Dat1_effect_T_P", "Dat1_effect_T_9r", "Dat1_effect_T_others"),
+  scale_y_discrete(limits = c("Dat1xTeffect", "Dat1_effect_T_9r", "Dat1_effect_T_others"),
                    labels = c("DAT1xT", "T in 9 repeats", "T in 10/10 homozygotes"))
 
 title_effect_sizes <- ggdraw() + 
@@ -752,106 +869,111 @@ title_effect_sizes <- ggdraw() +
     # hjust = -0.7
   ) 
 g_gen_all <- plot_grid( 
- plot_grid(g_w_comt, g_w_cag, g_noise_dat1, nrow = 1, rel_widths = c(0.8,1,0.6)),
- g_legend,
- plot_grid(g_stats_gen_mb_comt, g_stats_gen_mb_cag,g_stats_gen_noise_dat1, nrow = 1),
- title_effect_sizes,
-    rel_heights = c(1,0.15,0.35,0.1),
+  plot_grid(g_w_comt, g_w_cag, g_noise_dat1, nrow = 1, rel_widths = c(0.8,1,0.6)),
+  g_legend,
+  plot_grid(g_stats_gen_mb_comt, g_stats_gen_mb_cag,g_stats_gen_noise_dat1, nrow = 1),
+  title_effect_sizes,
+  rel_heights = c(1,0.15,0.35,0.1),
   ncol = 1)
 
 g_gen_all
 
 data_stat_gen_temp %>% lapply(., sf,1)
 
-# get posterior effects 
-
 if (FALSE) {
   
   post <- post_gen
   
-(post$beta_testosterone_w) %>% sf
+  (post$beta_testosterone_w) %>% sf(1)
   
-(post$beta_testosterone_noise) %>% sf
-
-# dat1 and MB 
+  (post$beta_testosterone_noise) %>% sf(1)
+  
+  # dat1 and MB 
   post$beta_dat1_testosterone_w %>% sf(1)
-(post$beta_testosterone_w + 1/2*post$beta_dat1_testosterone_w) %>% sf(1)
-(post$beta_testosterone_w - 1/2*post$beta_dat1_testosterone_w) %>% sf(1)
+  (post$beta_testosterone_w + 1/2*post$beta_dat1_testosterone_w) %>% sf(1)
+  (post$beta_testosterone_w - 1/2*post$beta_dat1_testosterone_w) %>% sf(1)
   
-# comt and MB 
-(post$beta_comt_testosterone_w) %>% sf
-(post$beta_comt_w + post$beta_comt_testosterone_w) %>% sf
+  # comt and MB 
+  (post$beta_comt_testosterone_w) %>% sf
+  (post$beta_comt_w + post$beta_comt_testosterone_w) %>% sf
   
-post$beta_comt_w %>% sf
-
+  post$beta_comt_w %>% sf
+  
   (post$beta_testosterone_w  - 1.41*post$beta_comt_testosterone_w) %>% sf
-(post$beta_testosterone_w  + 1.33*post$beta_comt_testosterone_w) %>% sf  
-
- (post$beta_testosterone_w  - 1.41*post$beta_comt_testosterone_w) %>% sf
-(post$beta_testosterone_w  + 1.33*post$beta_comt_testosterone_w) %>% sf  
-
-# cag and mb  
-(post$beta_cag_testosterone_w) %>% sf  
-(post$beta_cag_w + post$beta_cag_testosterone_w) %>% sf  
-
-(post$beta_testosterone_w  + post$beta_cag_testosterone_w) %>% sf
-(post$beta_testosterone_w  - post$beta_cag_testosterone_w) %>% sf
- 
-# dat1 and noise
-post$beta_testosterone_noise %>% sf(1)
-post$beta_dat1_testosterone_noise %>% sf(1)
-
-(post$beta_testosterone_noise + 1/2*post$beta_dat1_testosterone_noise) %>% sf(1)
-(post$beta_testosterone_noise - 1/2*post$beta_dat1_testosterone_noise) %>% sf(1)
- 
-
-# comt and noise
-(post$beta_comt_testosterone_noise) %>% sf
-(post$beta_comt_noise + post$beta_comt_testosterone_noise) %>% sf
+  (post$beta_testosterone_w  + 1.33*post$beta_comt_testosterone_w) %>% sf  
   
-post$beta_comt_noise %>% sf
-
-(post$beta_testosterone_noise  - 1.41*post$beta_comt_testosterone_noise) %>% sf
-(post$beta_testosterone_noise  + 1.33*post$beta_comt_testosterone_noise) %>% sf  
-
-# cag and noise 
-(post$beta_cag_testosterone_noise) %>% sf  
-(post$beta_cag_noise + post$beta_cag_testosterone_noise) %>% sf  
-
-(post$beta_testosterone_noise  + post$beta_cag_testosterone_noise) %>% sf
-(post$beta_testosterone_noise  - post$beta_cag_testosterone_noise) %>% sf
- 
-
-# dat1 and g
-post$beta_testosterone_g %>% sf(1)
-post$beta_dat1_testosterone_g %>% sf(1)
-
-(post$beta_testosterone_g + 1/2*post$beta_dat1_testosterone_g) %>% sf(1)
-(post$beta_testosterone_g - 1/2*post$beta_dat1_testosterone_g) %>% sf(1)
- 
-# comt and g
-(post$beta_comt_testosterone_g) %>% sf(1)
-(post$beta_comt_g + post$beta_comt_testosterone_g) %>% sf(1)
+  (post$beta_testosterone_w  - 1.41*post$beta_comt_testosterone_w) %>% sf
+  (post$beta_testosterone_w  + 1.33*post$beta_comt_testosterone_w) %>% sf  
   
-post$beta_comt_g %>% sf(1)
-
-(post$beta_testosterone_g  - 1.41*post$beta_comt_testosterone_g) %>% sf(1)
-(post$beta_testosterone_g  + 1.33*post$beta_comt_testosterone_g) %>% sf(1)  
-
-# cag and g 
-(post$beta_cag_testosterone_g) %>% sf(1)  
-(post$beta_cag_g + post$beta_cag_testosterone_g) %>% sf(1)  
-
-(post$beta_testosterone_g  + post$beta_cag_testosterone_g) %>% sf
-(post$beta_testosterone_g  - post$beta_cag_testosterone_g) %>% sf
- 
+  # cag and mb  
+  (post$beta_cag_testosterone_w) %>% sf  
+  (post$beta_cag_w + post$beta_cag_testosterone_w) %>% sf  
+  
+  
+  (post$beta_testosterone_w  + post$beta_cag_testosterone_w) %>% sf
+  (post$beta_testosterone_w  - post$beta_cag_testosterone_w) %>% sf
+  
+  # dat1 and noise
+  post$beta_testosterone_noise %>% sf(1)
+  post$beta_dat1_testosterone_noise %>% sf(1)
+  
+  (post$beta_testosterone_noise + 1/2*post$beta_dat1_testosterone_noise) %>% sf(1)
+  (post$beta_testosterone_noise - 1/2*post$beta_dat1_testosterone_noise) %>% sf(1)
+  
+  
+  # comt and noise
+  (post$beta_comt_testosterone_noise) %>% sf
+  (post$beta_comt_noise + post$beta_comt_testosterone_noise) %>% sf
+  
+  post$beta_comt_noise %>% sf
+  
+  (post$beta_testosterone_noise  - 1.41*post$beta_comt_testosterone_noise) %>% sf
+  (post$beta_testosterone_noise  + 1.33*post$beta_comt_testosterone_noise) %>% sf  
+  
+  # cag and noise 
+  (post$beta_cag_testosterone_noise) %>% sf  
+  (post$beta_cag_noise + post$beta_cag_testosterone_noise) %>% sf  
+  
+  (post$beta_testosterone_noise  + post$beta_cag_testosterone_noise) %>% sf
+  (post$beta_testosterone_noise  - post$beta_cag_testosterone_noise) %>% sf
+  
+  
+  # dat1 and g
+  post$beta_testosterone_g %>% sf(1)
+  post$beta_dat1_testosterone_g %>% sf(1)
+  
+  (post$beta_testosterone_g + 1/2*post$beta_dat1_testosterone_g) %>% sf(1)
+  (post$beta_testosterone_g - 1/2*post$beta_dat1_testosterone_g) %>% sf(1)
+  
+  # comt and g
+  (post$beta_comt_testosterone_g) %>% sf(1)
+  (post$beta_comt_g + post$beta_comt_testosterone_g) %>% sf(1)
+  
+  post$beta_comt_g %>% sf(1)
+  
+  (post$beta_testosterone_g  - 1.41*post$beta_comt_testosterone_g) %>% sf(1)
+  (post$beta_testosterone_g  + 1.33*post$beta_comt_testosterone_g) %>% sf(1)  
+  
+  # cag and g 
+  (post$beta_cag_testosterone_g) %>% sf(1)  
+  (post$beta_cag_g + post$beta_cag_testosterone_g) %>% sf(1)  
+  
+  (post$beta_testosterone_g  + post$beta_cag_testosterone_g) %>% sf
+  (post$beta_testosterone_g  - post$beta_cag_testosterone_g) %>% sf
+  
+  
+  lm(data = data_group_gen %>% filter(comt == 1), w ~ admin) %>% summary
+  
 }
 
 ```
-## genetics and behavior
+
+## Including genetic variables in the behavioral analysis 
 
 ```{r gen behavior and staying behavior}
-if(!file.exists("Brms Models/Brms_stay_beh_gen2.rds")){
+
+# run the model
+if(!file.exists("Brms Models/Brms_stay_beh_gen.rds")){
   cat("running the gen2 full  model\n")
   fit_model_beh <- brm(stay_num|trials(1) ~ (prev_state_diff*prev_points|ID) + admin*(cag_s+comt_s+dat1_c)*prev_points*prev_state_diff,
                  data = data_beh, family = binomial(),
@@ -862,9 +984,10 @@ if(!file.exists("Brms Models/Brms_stay_beh_gen2.rds")){
                  warmup = 1000, iter =3000, chains =4,
                  control = list(adapt_delta = 0.9))
   
-  saveRDS(fit_model_beh, file = "Brms Models/Brms_stay_beh_gen2.rds")
-}else fit_model_beh <- readRDS("Brms Models/Brms_stay_beh_gen2.rds")
-
+  saveRDS(fit_model_beh, file = "Brms Models/Brms_stay_beh_gen.rds")
+}
+# load the model
+fit_model_beh <- readRDS("Brms Models/Brms_stay_beh_gen.rds")
 
 Reffects <- ranef(fit_model_beh)
 Reffects <- Reffects[["ID"]]  
@@ -873,22 +996,22 @@ data_group$Prev_points_same <-  Reffects[,1,3]
 data_group$Prev_points_diff <- Reffects[,1,3] + Reffects[,1,4]
 data_group$Prev_points_diff_same <- Reffects[,1,4]
 data_group_slopes <- data_group %>% group_by(admin, comt_f) %>% summarize(N= n(),
-                                                     mean_pp_slopes = mean(Prev_points_slopes), 
-                                                     se_pp_slopes = sd(Prev_points_slopes)/sqrt(N-1),
-                                                       mean_pp_diff_slopes = mean(Prev_points_diff), 
-                                                     se_pp_diff_slopes = sd(Prev_points_diff)/sqrt(N-1),
-                                                       mean_pp_diff_same_slopes = mean(Prev_points_diff_same), 
-                                                     se_pp_diff_same_slopes = sd(Prev_points_diff_same)/sqrt(N-1))
+                                                                          mean_pp_slopes = mean(Prev_points_slopes), 
+                                                                          se_pp_slopes = sd(Prev_points_slopes)/sqrt(N-1),
+                                                                          mean_pp_diff_slopes = mean(Prev_points_diff), 
+                                                                          se_pp_diff_slopes = sd(Prev_points_diff)/sqrt(N-1),
+                                                                          mean_pp_diff_same_slopes = mean(Prev_points_diff_same), 
+                                                                          se_pp_diff_same_slopes = sd(Prev_points_diff_same)/sqrt(N-1))
 
 g_diff_comt <- ggplot(data = data_group, aes(x = admin, y = Prev_points_diff_same))+  # group = ID, linetype = Genotype)) 
   # geom_violin(aes(fill = admin))+
- # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
- 
-   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  
+  geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
   # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+
-    geom_errorbar(data =data_group_slopes, aes(x= admin, y = mean_pp_diff_same_slopes, ymin = mean_pp_diff_same_slopes - se_pp_diff_same_slopes, ymax = mean_pp_diff_same_slopes + se_pp_diff_same_slopes), width = 0, size  = 1.5)+
-    geom_point(data =data_group_slopes,aes(fill= admin, y = mean_pp_diff_same_slopes), position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.2)+
+  geom_errorbar(data =data_group_slopes, aes(x= admin, y = mean_pp_diff_same_slopes, ymin = mean_pp_diff_same_slopes - se_pp_diff_same_slopes, ymax = mean_pp_diff_same_slopes + se_pp_diff_same_slopes), width = 0, size  = 1.5)+
+  geom_point(data =data_group_slopes,aes(fill= admin, y = mean_pp_diff_same_slopes), position = position_dodge(0.9), size = 3, shape= 21, colour = "black")+
   theme_Publication(base_size = 10) +
   theme(axis.ticks.x = element_blank(),
         axis.text.x = element_blank(),
@@ -899,8 +1022,8 @@ g_diff_comt <- ggplot(data = data_group, aes(x = admin, y = Prev_points_diff_sam
   xlab("COMT polymorphism") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
 
 g_diff = ggplot(data = data_group, aes(x = admin, y = Prev_points_diff))+  # group = ID, linetype = Genotype)) 
-    geom_boxplot(aes(fill = admin), width=0.5, color="black", outlier.shape = NA)+
-   geom_violin(aes(fill = admin), alpha = 0.5)+
+  geom_boxplot(aes(fill = admin), width=0.5, color="black", outlier.shape = NA)+
+  geom_violin(aes(fill = admin), alpha = 0.5)+
   # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
   geom_jitter(size = 0.1) +  
   # geom_errorbar(data=data_sum, aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0)+
@@ -913,138 +1036,142 @@ g_diff = ggplot(data = data_group, aes(x = admin, y = Prev_points_diff))+  # gro
         panel.grid.major  = element_blank(),
         # legend.position = "none",
         legend.title = element_blank()) +
- ylim(c(0,1)) + # ylab(expression("\u03C9"[good])) +   ylab(expression("Diff_same"))+ 
+  ylim(c(0,1)) + # ylab(expression("\u03C9"[good])) +   ylab(expression("Diff_same"))+ 
   xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
 g_diff + facet_wrap(~comt_f)
 
 g_cag_pp_slope = data_group %>% ggplot(aes(x = w, y = cag_s, group = admin, colour = admin)) + geom_point() + geom_smooth(method = "lm", se = F)+
   discrete_scale("colour","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-  
+
 
 g_cag_noise = data_group %>% ggplot(aes(x = noise, y = cag_s, group = admin, colour = admin)) + geom_point() + geom_smooth(method = "lm", se = F)+
   discrete_scale("colour","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-  
-#  data_beh <- merge(data_group %>% select(ID, w, noise, g), data_beh, by = "ID") 
-# data_beh %>% glimpse
+
+data_beh <- merge(data_group %>% select(ID, w, noise, g), data_beh, by = "ID") 
+data_beh %>% glimpse
 
 
-# get posteriors 
+
 if (FALSE) {
-data_group_gen$comt_s = scale(data_group_gen$comt)
-data_group_gen$cag_s = scale(data_group_gen$cag)
-data_group_gen$cag_low = data_group_gen$cag_s < 0
-
-fit_model_beh_gen <-readRDS("Brms Models/Brms_stay_beh_gen.rds")
-fit_model_beh_gen %>% summary()
-post <- fit_model_beh_gen %>% posterior_samples()
-
-
-# moderating effect of dat1 on T with same first stage states 
-(post$`b_adminTestosterone:dat1_c1:prev_points`)  %>%  sf()
-(post$`b_adminTestosterone:dat1_c1:prev_points`+ post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent` )  %>%  sf()
-
-# moderating effect of dat1 on T with same first stage states 
-(post$`b_adminTestosterone:prev_points` - 1/2*post$`b_adminTestosterone:dat1_c1:prev_points`)  %>%  sf()
-
-(post$`b_adminTestosterone:prev_points` + 1/2*post$`b_adminTestosterone:dat1_c1:prev_points`)  %>%  sf()
- 
-# moderating effect of dat1 on T with different first stage states 
-
-(post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`  - 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points` + post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
-
-(post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`  + 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points` + post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
-
-# moderating effect of dat1 on T with diff - same
-
-(post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`  - 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
-
-(post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`  + 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
-
-# moderating effect of cag on T with same first stage states 
-(post$`b_adminTestosterone:cag_s:prev_points`)  %>%  sf()
-(post$`b_adminTestosterone:cag_s:prev_points` + post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-(post$`b_adminTestosterone:prev_points` - post$`b_adminTestosterone:cag_s:prev_points`)  %>%  sf()
-(post$`b_adminTestosterone:prev_points` + post$`b_adminTestosterone:cag_s:prev_points`)  %>%  sf()
-
-# moderating effect of cag on T with different first stage states 
-(post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` - (post$`b_adminTestosterone:cag_s:prev_points` + post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
-
-
-(post$`b_adminTestosterone:prev_points` + post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-# almost sig difference in cag slope T - P
-(post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
-# cag slope in T group
-(post$`b_cag_s:prev_points`+post$`b_cag_s:prev_points:prev_state_diffdifferent`+
-    post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
-
-# cag slope in pla  group
-(post$`b_cag_s:prev_points`+post$`b_cag_s:prev_points:prev_state_diffdifferent`) %>%  sf(1)
-
-# cag diff- same slope T - P
-(post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
-
-# cag diff- same slope in T group
-(post$`b_cag_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
-
-# cag diff- same slope in P group
-(post$`b_cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
-
-
-# cag slope in pla group
-(post$`b_cag_s:prev_points`+post$`b_cag_s:prev_points:prev_state_diffdifferent`) %>%  sf(1)
-
-(post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
-
-# moderating effect of comt on T with same first stage states of the Val val group
-
-(post$`b_adminTestosterone:comt_s:prev_points`)  %>%  sf()
-# comt slope T - P
-(post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-# comt slope T
-(post$`b_comt_s:prev_points` + post$`b_comt_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-# comt slope P 
-(post$`b_comt_s:prev_points` + post$`b_comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-# comt diff- same slope T - P
-(post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-# comt diff- same slope T 
-(post$`b_comt_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-# comt diff- same slope P
-(post$`b_comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-# comt diff- same slope T
-(post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-(post$`b_comt_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-(post$`b_comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-
-
-(post$`b_adminTestosterone:prev_points` - 1.42* post$`b_adminTestosterone:comt_s:prev_points`)  %>%  sf()
-(post$`b_adminTestosterone:prev_points` + 1.33* post$`b_adminTestosterone:comt_s:prev_points`)  %>%  sf()
-
-
-
-(post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` -1.42*( post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
-
-(post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` +1.33*( post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
-
-# moderating effect of cag on T with different first stage states 
-(post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` - (post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
-
-(post$`b_adminTestosterone:prev_points` + post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:comt_s:prev_points`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
-
-(post$`b_adminTestosterone:comt_s:prev_points`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf
+  data_group_gen$comt_s = scale(data_group_gen$comt)
+  data_group_gen$cag_s = scale(data_group_gen$cag)
+  data_group_gen$cag_low = data_group_gen$cag_s < 0
+  
+  fit_model_beh_gen <-readRDS("Brms Models/Brms_stay_beh_gen.rds")
+  fit_model_beh %>% summary() 
+  fit_model_beh %>% fixef()  %>% round(3) %>% write.csv(file = "Brms_stay_beh_gen.csv")
+  post <- fit_model_beh %>% posterior_samples()
+  
+  
+  # moderating effect of dat1 on T with same first stage states 
+  (post$`b_adminTestosterone:dat1_c1:prev_points`)  %>%  sf(1)
+  (post$`b_adminTestosterone:dat1_c1:prev_points`+ post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent` )  %>%  sf(1)
+  
+  post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent` %>% sf(1)
+  
+  # moderating effect of dat1 on T with same first stage states 
+  (post$`b_adminTestosterone:prev_points` - 1/2*post$`b_adminTestosterone:dat1_c1:prev_points`)  %>%  sf()
+  
+  (post$`b_adminTestosterone:prev_points` + 1/2*post$`b_adminTestosterone:dat1_c1:prev_points`)  %>%  sf()
+  
+  # moderating effect of dat1 on T with different first stage states 
+  
+  (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`  - 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points` + post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
+  
+  (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:prev_points`  + 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points` + post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
+  
+  # moderating effect of dat1 on T with diff - same
+  
+  (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`  - 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
+  
+  (post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`  + 1/2*(post$`b_adminTestosterone:dat1_c1:prev_points:prev_state_diffdifferent`))  %>% sf()
+  
+  # moderating effect of cag on T with same first stage states 
+  (post$`b_adminTestosterone:cag_s:prev_points`)  %>%  sf()
+  (post$`b_adminTestosterone:cag_s:prev_points` + post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  (post$`b_adminTestosterone:prev_points` - post$`b_adminTestosterone:cag_s:prev_points`)  %>%  sf()
+  (post$`b_adminTestosterone:prev_points` + post$`b_adminTestosterone:cag_s:prev_points`)  %>%  sf()
+  
+  # moderating effect of cag on T with different first stage states 
+  (post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` - (post$`b_adminTestosterone:cag_s:prev_points` + post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
+  
+  
+  (post$`b_adminTestosterone:prev_points` + post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  # almost sig difference in cag slope T - P
+  (post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
+  # cag slope in T group
+  (post$`b_cag_s:prev_points`+post$`b_cag_s:prev_points:prev_state_diffdifferent`+
+      post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
+  
+  # cag slope in pla  group
+  (post$`b_cag_s:prev_points`+post$`b_cag_s:prev_points:prev_state_diffdifferent`) %>%  sf(1)
+  
+  # cag diff- same slope T - P
+  (post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
+  
+  # cag diff- same slope in T group
+  (post$`b_cag_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
+  
+  # cag diff- same slope in P group
+  (post$`b_cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
+  
+  
+  # cag slope in pla group
+  (post$`b_cag_s:prev_points`+post$`b_cag_s:prev_points:prev_state_diffdifferent`) %>%  sf(1)
+  
+  (post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s:prev_points`+ post$`b_adminTestosterone:cag_s:prev_points:prev_state_diffdifferent`)  %>%  sf(1)
+  
+  # moderating effect of comt on T with same first stage states of the Val val group
+  
+  (post$`b_adminTestosterone:comt_s:prev_points`)  %>%  sf()
+  # comt slope T - P
+  (post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  # comt slope T
+  (post$`b_comt_s:prev_points` + post$`b_comt_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  # comt slope P 
+  (post$`b_comt_s:prev_points` + post$`b_comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  # comt diff- same slope T - P
+  (post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  # comt diff- same slope T 
+  (post$`b_comt_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  # comt diff- same slope P
+  (post$`b_comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  # comt diff- same slope T
+  (post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  (post$`b_comt_s:prev_points:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  (post$`b_comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  
+  
+  (post$`b_adminTestosterone:prev_points` - 1.42* post$`b_adminTestosterone:comt_s:prev_points`)  %>%  sf()
+  (post$`b_adminTestosterone:prev_points` + 1.33* post$`b_adminTestosterone:comt_s:prev_points`)  %>%  sf()
+  
+  
+  
+  (post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` -1.42*( post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
+  
+  (post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` +1.33*( post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
+  
+  # moderating effect of cag on T with different first stage states 
+  (post$`b_adminTestosterone:prev_points` +post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` - (post$`b_adminTestosterone:comt_s:prev_points` + post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`))  %>%  sf()
+  
+  (post$`b_adminTestosterone:prev_points` + post$`b_adminTestosterone:prev_points:prev_state_diffdifferent` + post$`b_adminTestosterone:comt_s:prev_points`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf()
+  
+  (post$`b_adminTestosterone:comt_s:prev_points`+ post$`b_adminTestosterone:comt_s:prev_points:prev_state_diffdifferent`)  %>%  sf
 }
 
 ```
 
 ```{r gen beh with earn }
 
+# run the model
 if(!file.exists("Brms Models/Brms_points_gen.rds")){
   cat("running the points model\n")
   Brms_points_gen <- brm(points ~ (prev_state_diff|ID) + admin*(dat1_c+comt_s+cag_s)*prev_state_diff,
@@ -1057,47 +1184,51 @@ if(!file.exists("Brms Models/Brms_points_gen.rds")){
                  control = list(adapt_delta = 0.9))
   
   saveRDS(Brms_points_gen, file = "Brms Models/Brms_points_gen.rds")
-} else Brms_points_gen <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Brms Models/Brms_points_gen.rds")
-
-
+}
+# load the model
+Brms_points_gen <- readRDS("Brms Models/Brms_points_gen.rds")
 Brms_points_gen%>% summary()
-  
-  post <- posterior_samples(Brms_points_gen)
-  sd_total = sqrt(post$sigma^2 + post$sd_ID__Intercept^2 + post$sd_ID__prev_state_diffdifferent^2)
-  # dat1 
-  (post$`b_adminTestosterone:dat1_c1`) %>% sf()
-   ((post$`b_adminTestosterone:dat1_c1`)/sd_total) %>% sf()
-  (post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`) %>% sf()
-    ((post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`)/sd_total) %>% sf()
-  (post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent` <0) %>% mean()
-  
-  # cag
-    (post$`b_adminTestosterone:cag_s`) %>% sf()
-   (post$`b_adminTestosterone:cag_s` + post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
-  
-  (post$b_cag_s + post$`b_cag_s:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s` + post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
-   
-  (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` - post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
 
-     (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` + post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
-  
-  # comt
-    (post$`b_adminTestosterone:comt_s`) %>% sf()
-  (post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
-  post$`b_adminTestosterone:comt_s:prev_state_diffdifferent` %>% sf
-  
-  # comt slope in T
-  (post$b_comt_s + post$`b_comt_s:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
-  
-   # comt ValVal
-  (post$`b_adminTestosterone:comt_s`*-1.4162920 + post$b_adminTestosterone) %>% sf()
-  
-  (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` -1.4162920*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
-  
-    (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` +1.33*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
-  
-  
-  
+# save stats
+Brms_points_gen %>%fixef()  %>% round(3) %>% write.csv(file = "Brms_points_gen.csv")
+
+# plot effect sizes 
+post <- posterior_samples(Brms_points_gen)
+sd_total = sqrt(post$sigma^2 + post$sd_ID__Intercept^2 + post$sd_ID__prev_state_diffdifferent^2)
+# dat1 
+(post$`b_adminTestosterone:dat1_c1`) %>% sf(1)
+((post$`b_adminTestosterone:dat1_c1`)/sd_total) %>% sf()
+(post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`) %>% sf(1)
+((post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`)/sd_total) %>% sf()
+(post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent` <0) %>% mean()
+post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent` %>% sf(1)
+# cag
+(post$`b_adminTestosterone:cag_s`) %>% sf()
+(post$`b_adminTestosterone:cag_s` + post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
+
+(post$b_cag_s + post$`b_cag_s:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s` + post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
+
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` - post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
+
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` + post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
+
+# comt
+(post$`b_adminTestosterone:comt_s`) %>% sf()
+(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
+post$`b_adminTestosterone:comt_s:prev_state_diffdifferent` %>% sf
+
+# comt slope in T
+(post$b_comt_s + post$`b_comt_s:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
+
+# comt ValVal
+(post$`b_adminTestosterone:comt_s`*-1.4162920 + post$b_adminTestosterone) %>% sf()
+
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` -1.4162920*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
+
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` +1.33*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
+
+
+
 data_earn <- data_beh %>%  filter(!is.na(prev_state_diff), rt1 > 200) %>%
   group_by(prev_state_diff, admin, ID, Gen_cluster) %>% 
   summarize(N=n(), earn = mean(points),
@@ -1110,14 +1241,14 @@ data_box_earn <- data_earn %>% group_by(admin, prev_state_diff, Gen_cluster) %>%
             se_earn = sd(earn, na.rm = T)/sqrt(N-1),
             mean_log_rt = mean(log_rt),
             se_log_rt = sd(log_rt, na.rm = T)/sqrt(N-1)
-            )
+  )
 
 g_earn_gen <- ggplot(data = data_earn, aes(x = admin, y = earn))+  # group = ID, linetype = Genotype)) 
   # geom_violin(aes(fill = admin))+
- # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
- #   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
+  # geom_boxplot(aes(fill = admin), width=0.35, color="black", outlier.shape = NA)+
+  #   geom_violin(aes(fill = admin),colour = "black", alpha = 0.2)+
   # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
- geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.5)+theme_Publication(base_size = 10) +
+  geom_point(aes(fill = admin),  position = position_jitterdodge(dodge.width= 0.9, jitter.width = 0.3), shape = 21,      colour = "black", size = 2, stroke =1, alpha = 0.5)+theme_Publication(base_size = 10) +
   theme(axis.ticks.x = element_blank(),
         axis.text.x = element_blank(),
         panel.grid.major  = element_blank(),
@@ -1128,20 +1259,20 @@ g_earn_gen <- ggplot(data = data_earn, aes(x = admin, y = earn))+  # group = ID,
 
 g_earn_gen
 g_earn_2 <- ggplot(data = data_earn, aes(x = admin, group = admin)) +
-    # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
-   geom_errorbar(data = data_box_earn, aes(ymin = mean_earn - se_earn, ymax = mean_earn + se_earn), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
-   geom_point(data = data_box_earn, aes(colour = admin, y = mean_earn), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
- 
+  # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
+  geom_errorbar(data = data_box_earn, aes(ymin = mean_earn - se_earn, ymax = mean_earn + se_earn), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
+  geom_point(data = data_box_earn, aes(colour = admin, y = mean_earn), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
+  
   # geom_jitter(data  =data_earn, aes(x=admin, y=earn), size = 0.2) + 
   theme_Publication(base_size = 10) + theme(legend.position = "none") + xlab("") +ylab("Average Points per Trial") +scale_x_discrete(labels = c("P", "T" ))+
   scale_colour_Publication()+ facet_wrap(vars(Gen_cluster,prev_state_diff))
 g_earn_2
-  
+
 g_rt_2 <- ggplot(data = data_earn, aes(x = admin, group = admin)) +
-    # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
-   geom_errorbar(data = data_box_earn, aes(ymin = mean_log_rt - se_log_rt, ymax = mean_log_rt + se_log_rt), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
-   geom_point(data = data_box_earn, aes(colour = admin, y = mean_log_rt), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
- 
+  # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
+  geom_errorbar(data = data_box_earn, aes(ymin = mean_log_rt - se_log_rt, ymax = mean_log_rt + se_log_rt), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
+  geom_point(data = data_box_earn, aes(colour = admin, y = mean_log_rt), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
+  
   # geom_jitter(data  =data_earn, aes(x=admin, y=earn), size = 0.2) + 
   theme_Publication(base_size = 10) + theme(legend.position = "none") + xlab("") +ylab("Average Points per Trial") +scale_x_discrete(labels = c("P", "T" ))+
   scale_colour_Publication()+ facet_wrap(vars(Gen_cluster,prev_state_diff))
@@ -1159,23 +1290,23 @@ data_box_earn <- data_earn %>% group_by(admin, Gen_cluster) %>%
             se_earn = sd(earn, na.rm = T)/sqrt(N-1),
             mean_log_rt = mean(log_rt),
             se_log_rt = sd(log_rt, na.rm = T)/sqrt(N-1)
-            )
+  )
 
 g_earn_3 <- ggplot(data = data_earn, aes(x = admin, group = admin)) +
-    # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
-   geom_errorbar(data = data_box_earn, aes(ymin = mean_earn - se_earn, ymax = mean_earn + se_earn), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
-   geom_point(data = data_box_earn, aes(colour = admin, y = mean_earn), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
- 
+  # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
+  geom_errorbar(data = data_box_earn, aes(ymin = mean_earn - se_earn, ymax = mean_earn + se_earn), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
+  geom_point(data = data_box_earn, aes(colour = admin, y = mean_earn), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
+  
   # geom_jitter(data  =data_earn, aes(x=admin, y=earn), size = 0.2) + 
   theme_Publication(base_size = 10) + theme(legend.position = "none") + xlab("") +ylab("Average Points per Trial") +scale_x_discrete(labels = c("P", "T" ))+
   scale_colour_Publication()+ facet_wrap(vars(Gen_cluster))
 g_earn_3
-  
+
 g_rt_3 <- ggplot(data = data_earn, aes(x = admin, group = admin)) +
-    # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
-   geom_errorbar(data = data_box_earn, aes(ymin = mean_log_rt - se_log_rt, ymax = mean_log_rt + se_log_rt), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
-   geom_point(data = data_box_earn, aes(colour = admin, y = mean_log_rt), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
- 
+  # geom_point(aes(colour = admin, y = earn), position = position_dodge(width = 0.1), stat = "identity",  size = 1) +
+  geom_errorbar(data = data_box_earn, aes(ymin = mean_log_rt - se_log_rt, ymax = mean_log_rt + se_log_rt), colour = "black", width=0, position = position_dodge(0.9), size = 1) +
+  geom_point(data = data_box_earn, aes(colour = admin, y = mean_log_rt), position = position_dodge(width = 0.1), stat = "identity",  size = 3) +
+  
   # geom_jitter(data  =data_earn, aes(x=admin, y=earn), size = 0.2) + 
   theme_Publication(base_size = 10) + theme(legend.position = "none") + xlab("") +ylab("Average Points per Trial") +scale_x_discrete(labels = c("P", "T" ))+
   scale_colour_Publication()+ facet_wrap(vars(Gen_cluster))
@@ -1185,10 +1316,11 @@ g_rt_3
 ```
 
 ```{r gen rt}
-  
-if(!file.exists("Brms Models/Brms_rt.rds")){
+
+if(!file.exists("Brms Models/Brms_rt_gen.rds")){
   cat("running the points model\n")
-  Brms_rt_gen <- brm(log(rt1) ~ (prev_state_diff|ID) + admin*prev_state_diff,
+ 
+  Brms_rt_gen <- brm(log(rt1) ~ (prev_state_diff|ID) + admin*(comt_s+dat1_c+cag_s)*prev_state_diff,
                  data = data_beh%>% filter(rt1>200, !is.na(prev_state_diff)),
                  prior = c(set_prior("cauchy(0,2)", class = "sd"),
                            set_prior("normal(0,3)", class = "b"),
@@ -1197,671 +1329,53 @@ if(!file.exists("Brms Models/Brms_rt.rds")){
                  warmup = 1000, iter =3000, chains =4,
                  control = list(adapt_delta = 0.9))
   
-  saveRDS(Brms_rt_gen, file = "Brms Models/Brms_rt.rds")
-} Brms_rt_gen <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Brms Models/Brms_rt_gen.rds")
-  Brms_rt_gen%>% summary()
-  
-  
-  post <- posterior_samples(Brms_rt_gen)
-  sd_total = sqrt(post$sigma^2 + post$sd_ID__Intercept^2 + post$sd_ID__prev_state_diffdifferent^2)
-  
- (post$`b_adminTestosterone:dat1_c1`) %>% sf()
-   ((post$`b_adminTestosterone:dat1_c1`)/sd_total) %>% sf()
-  (post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`) %>% sf()
-    ((post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`)/sd_total) %>% sf()
-  (post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent` <0) %>% mean()
-  
-  # cag
-    (post$`b_adminTestosterone:cag_s`) %>% sf()
-  (post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
-  
-   (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
-  # comt
-    (post$`b_adminTestosterone:comt_s`) %>% sf()
-  (post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
-  
-      (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
-  
-  
-  # comt ValVal
-    (post$`b_adminTestosterone:comt_s`*-1.4162920 + post$b_adminTestosterone) %>% sf()
-   (post$`b_adminTestosterone:comt_s`*1.33 + post$b_adminTestosterone) %>% sf()
-  
-  (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` -1.4162920*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
-  
-  (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` +1.33*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
-  
-  (post$`b_adminTestosterone:prev_state_diffdifferent` +1.33*( post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
-  
-  (post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent`)%>% sf
-  
-
-```
-
-```{r mediation}
-library("mediation")
-
- data_rtXearn <- data_beh %>% filter(rt1 > 200, !is.na(prev_state_diff))%>%
- 
-  group_by(prev_state_diff, ID, admin) %>% 
-  summarize(N=n(), log_rt1 = mean(log(rt1)),
-            earn = mean(points),
-            admin=admin[1])
-   data_rtXearn_diff <- merge(data_group_gen, data_rtXearn  %>% filter(prev_state_diff == "different"), by = "ID") %>% rename(admin = admin.x)
-  data_rtXearn_same <- merge(data_group_gen, data_rtXearn  %>% filter(prev_state_diff == "same"), by = "ID") %>% rename(admin = admin.x)
-
-  data_rtXearn2 <- data_beh %>% filter(rt1 > 200, !is.na(prev_state_diff)) %>%
- 
-  group_by(ID, admin) %>% 
-  summarize(N=n(), log_rt1 = mean(log(rt1)),
-            earn = mean(points),
-            admin=admin[1])
-   data_rtXearn_all <- merge(data_group_gen, data_rtXearn2, by = "ID") %>% rename(admin = admin.x)
-  
-#     m.earnxrt <-lm(data = data_rtXearn_diff %>% filter(admin == "Testosterone"), earn ~ log_rt1)
-# m.earnxmb <-lm(data = data_rtXearn_diff %>% filter(admin == "Testosterone"), w ~ earn)
-# m.rtxmb <-lm(data = data_rtXearn_diff %>% filter(admin == "Testosterone"), w ~ log_rt1)
-# 
-# m.rtxmb <-lm(data = data_rtXearn_same, noise ~ log_rt1*admin)
-# m.rtxmb <-lm(data = data_rtXearn_diff, noise ~ log_rt1*admin)
-# summary(m.rtxmb)
-# data_rtXearn_diff %>% glimpse()
-
-
-
-
-data_rtXearn_all$log_rt1_s = scale(data_rtXearn_all$log_rt1)
-data_rtXearn_all$w_s = scale(data_rtXearn_all$w)
-data_rtXearn_all$comt_s = scale(data_rtXearn_all$comt)
-data_rtXearn_all$BIS_s = scale(data_rtXearn_all$BIS)
-data_rtXearn_all$comt_f2 =  factor(data_rtXearn_all$comt == 1, levels = c(FALSE, TRUE), labels = c("other", "ValVal"))
-
-data_rtXearn_all$cag_s = scale(data_rtXearn_all$cag)
-data_rtXearn_all$cag_f = factor(data_rtXearn_all$cag_s < 1, levels = c(FALSE, TRUE), labels = c("other", "low CAG"))
-
-get_med_table <- function(med_model) {
-  x  <- med_model %>% summary() 
-x  <- x %>% tidy(conf.int = 0.95) %>% dplyr::select(term, estimate, p.value, conf.low, conf.high) %>% filter(term %in% c("acme_0", "ade_0")) %>% mutate(moderator = names( x$covariates), set_to = x$covariates[[1]])
-  
+  saveRDS(Brms_rt_gen, file = "Brms Models/Brms_rt_gen.rds")
 }
 
-## state impulsivity  
-out.fit <- lm(w_s ~ admin*dat1 + log_rt1_s, data = data_rtXearn_all)
-med.fit <- lm(log_rt1_s ~ admin*dat1,  data = data_rtXearn_all)
-med.out_9reps <- mediate(med.fit, out.fit, treat = "admin", mediator = "log_rt1_s", covariates = list(dat1 = "9 repeats"),robustSE = TRUE, sims = 1000)
+# load the model 
 
-med.out_others <- mediate(med.fit, out.fit, treat = "admin", mediator = "log_rt1_s", covariates = list(dat1 = "other"),robustSE = TRUE, sims = 1000)
+Brms_rt_gen <- readRDS("Brms Models/Brms_rt_gen.rds")
+Brms_rt_gen%>% summary()
 
-mediation_results <-  get_med_table(med.out_9reps)
-mediation_results <- rbind(mediation_results , get_med_table(med.out_others) )
+# get effect sizes and plots
 
 
+Brms_rt_gen%>%fixef()  %>% round(3) %>% write.csv(file = "Brms_rt_gen.csv")
 
+post <- posterior_samples(Brms_rt_gen)
+sd_total = sqrt(post$sigma^2 + post$sd_ID__Intercept^2 + post$sd_ID__prev_state_diffdifferent^2)
 
-out.fit2 <- lm(w_s ~ admin*comt_f2 + log_rt1_s, data = data_rtXearn_all)
-med.fit2 <- lm(log_rt1_s ~ admin*comt_f2,  data = data_rtXearn_all)
-med.out_ValVal <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "log_rt1_s", covariates = list(comt_f2 = "ValVal"),robustSE = TRUE, sims = 1000)
-med.out_comt_other <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "log_rt1_s", covariates = list(comt_f2 = "other"),robustSE = TRUE, sims = 1000)
+(post$`b_adminTestosterone:dat1_c1`) %>% sf(1)
+((post$`b_adminTestosterone:dat1_c1`)/sd_total) %>% sf(1)
+(post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`) %>% sf(1)
 
+((post$`b_adminTestosterone:dat1_c1`+ post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`)/sd_total) %>% sf()
+(post$`b_adminTestosterone:dat1_c1:prev_state_diffdifferent`) %>% sf(1)
 
-summary(med.out_ValVal)
-summary(med.out_comt_other)
+# cag
+(post$`b_adminTestosterone:cag_s`) %>% sf()
+(post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
 
-mediation_results <- rbind(mediation_results , get_med_table(med.out_ValVal) )
-mediation_results <- rbind(mediation_results , get_med_table(med.out_comt_other) )
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent`+ post$`b_adminTestosterone:cag_s`+ post$`b_adminTestosterone:cag_s:prev_state_diffdifferent`) %>% sf()
+# comt
+(post$`b_adminTestosterone:comt_s`) %>% sf()
+(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
 
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent`+ post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`) %>% sf()
 
 
+# comt ValVal
+(post$`b_adminTestosterone:comt_s`*-1.4162920 + post$b_adminTestosterone) %>% sf()
+(post$`b_adminTestosterone:comt_s`*1.33 + post$b_adminTestosterone) %>% sf()
 
-out.fit2 <- lm(w_s ~ admin*cag_f + log_rt1_s, data = data_rtXearn_all)
-med.fit2 <- lm(log_rt1_s ~ admin*cag_f,  data = data_rtXearn_all)
-med.out_lowCAG <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "log_rt1_s", covariates = list(cag_f = "low CAG"),robustSE = TRUE, sims = 1000)
-med.out_other <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "log_rt1_s", covariates = list(cag_f = "other"),robustSE = TRUE, sims = 1000)
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` -1.4162920*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
 
-summary(med.out_lowCAG)
-summary(med.out_other)
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent` +1.33*(post$`b_adminTestosterone:comt_s`+ post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
 
-mediation_results <- rbind(mediation_results , get_med_table(med.out_lowCAG) )
-mediation_results <- rbind(mediation_results , get_med_table(med.out_other) )
+(post$`b_adminTestosterone:prev_state_diffdifferent` +1.33*( post$`b_adminTestosterone:comt_s:prev_state_diffdifferent`)) %>% sf()
 
-mediation_results_state <- mediation_results %>% mutate(across(is.numeric, round,3))
+(post$b_adminTestosterone + post$`b_adminTestosterone:prev_state_diffdifferent`)%>% sf
 
-write.csv (mediation_results_state, file = "mediation_results_state.csv")
-
-
-
-## triat impulsivity 
-
-out.fit <- lm(w_s ~ admin*dat1 + BIS_s, data = data_rtXearn_all)
-med.fit <- lm(BIS_s ~ admin*dat1,  data = data_rtXearn_all)
-med.bis.out_9reps <- mediate(med.fit, out.fit, treat = "admin", mediator = "BIS_s", covariates = list(dat1 = "9 repeats"),robustSE = TRUE, sims = 1000)
-
-med.bis.out_others <- mediate(med.fit, out.fit, treat = "admin", mediator = "BIS_s", covariates = list(dat1 = "other"),robustSE = TRUE, sims = 1000)
-
-mediation_results <-  get_med_table(med.bis.out_9reps)
-mediation_results <- rbind(mediation_results , get_med_table(med.bis.out_others) )
-
-
-
-
-out.fit2 <- lm(w_s ~ admin*comt_f2 + BIS_s, data = data_rtXearn_all)
-med.fit2 <- lm(BIS_s ~ admin*comt_f2,  data = data_rtXearn_all)
-med.bis.out_ValVal <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "BIS_s", covariates = list(comt_f2 = "ValVal"),robustSE = TRUE, sims = 1000)
-med.bis.out_comt_other <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "BIS_s", covariates = list(comt_f2 = "other"),robustSE = TRUE, sims = 1000)
-
-
-summary(med.bis.out_ValVal)
-summary(med.bis.out_comt_other)
-
-mediation_results <- rbind(mediation_results , get_med_table(med.bis.out_ValVal) )
-mediation_results <- rbind(mediation_results , get_med_table(med.bis.out_comt_other) )
-
-
-
-
-out.fit2 <- lm(w_s ~ admin*cag_f + BIS_s, data = data_rtXearn_all)
-med.fit2 <- lm(BIS_s ~ admin*cag_f,  data = data_rtXearn_all)
-med.bis.out_lowCAG <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "BIS_s", covariates = list(cag_f = "low CAG"),robustSE = TRUE, sims = 1000)
-med.bis.out_other <- mediate(med.fit2, out.fit2, treat = "admin", mediator = "BIS_s", covariates = list(cag_f = "other"),robustSE = TRUE, sims = 1000)
-
-summary(med.bis.out_lowCAG)
-summary(med.bis.out_other)
-
-mediation_results <- rbind(mediation_results , get_med_table(med.bis.out_lowCAG) )
-mediation_results <- rbind(mediation_results , get_med_table(med.bis.out_other) )
-
-mediation_results_trait <- mediation_results %>% mutate(across(is.numeric, round,3))
-
-write.csv (mediation_results_trait, file = "mediation_results_trait.csv")
-
- 
-```
-```{r playaround with behavior and genetics}
-fit_model_beh <- readRDS("Brms Models/brms_stay_beh2.rds")
-Reffects <- ranef(fit_model_beh)
-Reffects <- Reffects[["ID"]]  
-Prev_points_slopes <-  Reffects[,1,3]
-data_group$Prev_points_same <-  Reffects[,1,3]
-data_group$Prev_points_diff <- Reffects[,1,3] + Reffects[,1,4]
-data_group$Prev_points_diff_same <- Reffects[,1,4]
-data_group_comt <- data_group %>% group_by(admin, comt_f) %>% summarize(N= n(),
-                                                     mean_slopes = mean(Prev_points_slopes), 
-                                                     se_slopes = sd(Prev_points_slopes)/sqrt(N))
-
-
-g_diff = ggplot(data = data_group, aes(x = admin, y = Prev_points_diff))+  # group = ID, linetype = Genotype)) 
-    geom_boxplot(aes(fill = admin), width=0.5, color="black", outlier.shape = NA)+
-   geom_violin(aes(fill = admin), alpha = 0.5)+
-  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
-  geom_jitter(size = 0.1) +  
-  # geom_errorbar(data=data_sum, aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0)+
-  # geom_point(data=data_sum, aes(x=admin, y = mean_w, colour = admin), size = 2) +
-  # 
-  theme_Publication(base_size = 10) +
-  scale_colour_Publication()+scale_fill_Publication()+
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        panel.grid.major  = element_blank(),
-        # legend.position = "none",
-        legend.title = element_blank()) +
- ylim(c(0,1)) + # ylab(expression("\u03C9"[good])) +   ylab(expression("Diff_same"))+ 
-  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-
-g_cag_pp_slope = data_group %>% ggplot(aes(x = w, y = cag_s, group = admin, colour = admin)) + geom_point() + geom_smooth(method = "lm", se = F)+
-  discrete_scale("colour","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-  
-
-g_cag_noise = data_group %>% ggplot(aes(x = noise, y = cag_s, group = admin, colour = admin)) + geom_point() + geom_smooth(method = "lm", se = F)+
-  discrete_scale("colour","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-  
- data_beh <- merge(data_group %>% select(ID, w, noise, g), data_beh, by = "ID") 
-data_beh %>% glimpse
-
-
-mod1 = lm( data = data_group, logit(w) ~ admin*Gen_cluster)
-
-mod1 = lm( data = data_group,noise ~ admin*(cag_s+dat1_c+comt_s))
-
-mod1 = lm( data = data_group,g ~ admin*(cag_s+dat1_c+comt_s))
-
-
-g_w = ggplot(data = data_group, aes(x = admin, y = w))+  # group = ID, linetype = Genotype)) 
-    geom_boxplot(aes(fill = admin), width=0.5, color="black", outlier.shape = NA)+
-   geom_violin(aes(fill = admin), alpha = 0.5)+
-  # stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") + 
-  geom_jitter(size = 0.1) +  
-  # geom_errorbar(data=data_sum, aes(x= admin, y = mean_w, ymin = mean_w - se_w, ymax = mean_w + se_w), width = 0)+
-  # geom_point(data=data_sum, aes(x=admin, y = mean_w, colour = admin), size = 2) +
-  # 
-  theme_Publication(base_size = 10) +
-  scale_colour_Publication()+scale_fill_Publication()+
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        panel.grid.major  = element_blank(),
-        # legend.position = "none",
-        legend.title = element_blank()) +
- ylim(c(0,1)) + # ylab(expression("\u03C9"[good])) +   ylab(expression("Diff_same"))+ 
-  xlab("") #+ discrete_scale("fill","Publication", manual_pal(values = c("#386cb0","#fdb462")))
-
-``` 
-
-## Supplementary material
-
-## Model comparison
-
-
-```{r compare model stats, echo=FALSE, warning= FALSE, massage = FALSE}
-
-
-#  stan model compare models  -------------------
-# M_nolr_loo <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Model_results/M_nolr_loo.rds")
-# M_kool_1lr_loo <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Model_results/M_kool_1lr_loo.rds")
-# M_kool_2lr_loo <- readRDS("~/mnt/p/userdata/mikusn22/data/Hana MBMF Testo/Model_results/M_kool_2lr_loo.rds")
-# loo.M_nolr_loo <- loo::loo(M_nolr_loo)
-# loo.M_kool_1lr_loo<- loo::loo(M_kool_1lr_loo)
-# loo.M_kool_2lr_loo<- loo::loo(M_kool_2lr_loo)
-# 
-# pbma_BB_wts <- pseudobma_weights(cbind(loo.M_nolr_loo$pointwise[,"elpd_loo"],
-#                                        loo.M_kool_1lr_loo$pointwise[,"elpd_loo"],
-#                                        loo.M_kool_2lr_loo$pointwise[,"elpd_loo"]))
-# 
-# cdata <- loo_compare(loo.M_nolr_loo, loo.M_kool_1lr_loo, loo.M_kool_2lr_loo)
-# 
-# cData <- as.data.frame(cdata)
-# cData <- cData%>% mutate(model = c(1,3,2), BB_wts = pbma_BB_wts)
-# saveRDS(cData, file ="Model_comparison.rds")
-
-cData <- readRDS("Model_comparison.rds")
-g_compare_models <- ggplot(cData, aes(x = model, y =  elpd_diff)) +  
-  
-  
-  geom_errorbar(aes(ymin= elpd_diff - se_diff, ymax = elpd_diff+se_diff), width = 0.2, position = position_dodge(0.9)) + theme_Publication(base_size = 10) +
-  geom_bar(position = position_dodge(), stat = "identity") +  scale_x_discrete(name="", limits = c("M1", "M2", "M3")) + 
-  
-  ylab("Comparing expected\nlog predictive density")
-
-g_compare_models
-
-
-```
-
-## frequentist analysis 
-
-```{r freq analysis}
-library(lmerTest)
-library(lme4)
-
-data_beh = merge(data_beh, data_group %>% select(ID, Gen_cluster), by = "ID")
-# points
-
-lm.full <- lmerTest::lmer(points ~ (prev_state_diff|ID) + admin*Gen_cluster*prev_state_diff,
-                 data = data_beh, REML = F )
-lm.noref <- lmerTest::lmer(points ~ (1|ID) + admin*prev_state_diff,
-                 data = data_beh, REML = F ) 
-anova(lm.full, lm.noref)
-lm.noref %>% summary()
-
-# staying behavior
-lm.stay.full <- glmer(stay_num ~ (prev_state_diff+prev_points|ID) + admin*prev_points*prev_state_diff,
-                 data = data_beh, family = binomial())
-lm.stay.red <- glmer(stay_num ~ (prev_state_diff|ID) + admin*prev_points*prev_state_diff,
-                 data = data_beh, family = binomial()) 
-lm.stay.noref <- glmer(stay_num ~ (1|ID) + admin*prev_points*prev_state_diff,
-                 data = data_beh, family = binomial()) 
-
-anova(lm.stay.full, lm.stay.red, lm.stay.noref)
-
-lm.stay.noref %>% summary()
-
-
-```
-
-##  parameter retrieval  
-
-For each subject we selected 5 paramter sets drawn from that subjects mean and standard deviation and simulated data from those parameters. We then refitted the model from the simulated data and found that the parameters recover very well.
-```{r, echo=FALSE, warning= FALSE, fig.width = 12, eval= FALSE}
-# savedataset = "Refit_lkj_hgf_pw"  
-# drf_temp <- readRDS(paste(savedataset, "_pars_all.rds", sep=""))
-# drf_temp$om_mean <- 1/2*(drf_temp$om_good +drf_temp$om_bad)
-# drf_temp$om_mean_rf <- 1/2*(drf_temp$om_good_rf +drf_temp$om_bad_rf)
-# 
-# drf_temp$om_diff <- drf_temp$om_good -drf_temp$om_bad
-# # drf_temp$om_diff_rf <- drf_temp$om_good_rf -drf_temp$om_bad_rf
-# # cor.test(drf_temp$om_diff,drf_temp$om_diff_rf)
-# g_rf_om_mean<- ggplot(data =drf_temp, aes(x= om_mean, y = om_mean_rf)) + 
-#   geom_point()+
-#   geom_smooth(method = "lm") + 
-#   # coord_cartesian(xlim = c(-8,0), ylim = c(-8,0)) +   
-#   theme_Publication(base_size = 10) + 
-#   theme(axis.text.x = element_blank(),
-#         axis.ticks.x = element_blank(),
-#         panel.grid.major  = element_blank(),
-#         legend.position = "none") +   ylab("refitted om") + xlab("om") + 
-#   labs(title=paste("corr = ", round(cor.test(drf_temp$om_mean,drf_temp$om_mean_rf)[["estimate"]],2), sep=""))
-# 
-# # g_rf_om_good<- ggplot(data =drf_temp, aes(x= om_good, y = om_good_rf)) + 
-# #   geom_point()+
-# #   geom_smooth(method = "lm") + 
-# #   # coord_cartesian(xlim = c(-8,0), ylim = c(-8,0)) +   
-# #   theme_Publication(base_size = 10) + 
-# #   theme(axis.text.x = element_blank(),
-# #         axis.ticks.x = element_blank(),
-# #         panel.grid.major  = element_blank(),
-# #         legend.position = "none") +   ylab("refitted om_good") + xlab("om_good") + 
-# #   labs(title=paste("corr = ", round(cor.test(drf_temp$om_good,drf_temp$om_good_rf)[["estimate"]],2), sep=""))
-# 
-# # g_rf_om_bad<- ggplot(data =drf_temp, aes(x= om_bad, y = om_bad_rf)) + 
-# #   geom_point()+
-# #   geom_smooth(method = "lm") + 
-# #   # coord_cartesian(xlim = c(-8,0), ylim = c(-8,0)) +   
-# #   theme_Publication(base_size = 10) + 
-# #   theme(axis.text.x = element_blank(),
-# #         axis.ticks.x = element_blank(),
-# #         panel.grid.major  = element_blank(),
-# #         legend.position = "none") +   ylab("refitted om_bad") + xlab("om_bad") + 
-# #   labs(title=paste("corr = ", round(cor.test(drf_temp$om_bad,drf_temp$om_bad_rf)[["estimate"]],2), sep=""))
-# 
-# g_rf_noise<- ggplot(data =drf_temp, aes(x= noise, y = noise_rf)) + 
-#   geom_point()+
-#   geom_smooth(method = "lm") + 
-#   # coord_cartesian(xlim = c(-8,0), ylim = c(-8,0)) +   
-#   theme_Publication(base_size = 10) + 
-#   theme(axis.text.x = element_blank(),
-#         axis.ticks.x = element_blank(),
-#         panel.grid.major  = element_blank(),
-#         legend.position = "none") +   ylab("refitted noise") + xlab("noise") + 
-#   labs(title=paste("corr = ", round(cor.test(drf_temp$noise,drf_temp$noise_rf)[["estimate"]],2), sep=""))
-# g_rf_mu0<- ggplot(data =drf_temp, aes(x= mu0, y = mu0_rf)) + 
-#   geom_point()+
-#   geom_smooth(method = "lm") + 
-#   # coord_cartesian(xlim = c(-8,0), ylim = c(-8,0)) +   
-#   theme_Publication(base_size = 10) + 
-#   theme(axis.text.x = element_blank(),
-#         axis.ticks.x = element_blank(),
-#         panel.grid.major  = element_blank(),
-#         legend.position = "none") +   ylab("refitted mu0") + xlab("mu0") + 
-#   labs(title=paste("corr = ", round(cor.test(drf_temp$mu0,drf_temp$mu0_rf)[["estimate"]],2), sep=""))
-# 
-# g_rf_loggam<- ggplot(data =drf_temp, aes(x= loggam, y = loggam_rf)) + 
-#   geom_point()+
-#   geom_smooth(method = "lm") + 
-#   # coord_cartesian(xlim = c(-8,0), ylim = c(-8,0)) +   
-#   theme_Publication(base_size = 10) + 
-#   theme(axis.text.x = element_blank(),
-#         axis.ticks.x = element_blank(),
-#         panel.grid.major  = element_blank(),
-#         legend.position = "none") +   ylab("refitted log(gamma)") + xlab("log(gamma)") + 
-#   labs(title=paste("corr = ", round(cor.test(drf_temp$loggam,drf_temp$loggam_rf)[["estimate"]],2), sep=""))
-# plot_grid(g_rf_om_mean, g_rf_noise, g_rf_mu0,g_rf_loggam, ncol = 4)
-```
-
-
-
-##  model posterior predictive checks 
-Plot model predictions for investment and change
-```{r, fig.width = 10, fig.height = 9, echo=FALSE, warning= FALSE, eval= FALSE}
-# # collect the model predictions  -----------------------------------------------------------
-# Pars_extract_set <- rstan::extract(fit_model_gen, pars=c('y_pred',
-#                                                          'mu_good_vect',
-#                                                          'mu_bad_vect',
-#                                                          'mu_good2_vect',
-#                                                          'mu_bad2_vect',
-#                                                          'pi_good_vect',
-#                                                          'pi_bad_vect',
-#                                                          'pi_good2_vect',
-#                                                          'pi_bad2_vect',
-#                                                          'om_good'))
-# 
-# if (file.exists("Data_beh_with_predictions.rds")) {
-#   data_plot_model_pred<-readRDS("Data4PlottingPosteriorChecks.rds")
-#   data_plot_model_pred_gen<-readRDS("Data4PlottingPosteriorChecks_genotype.rds")
-#   lr1_mat<- readRDS("Data4PlottingLearningRates.rds")
-#   y_pred_change <- readRDS("y_pred_change.rds")
-#   data_group <- readRDS( "Data_group_with_predictions.rds")
-#   data_beh <- readRDS("Data_beh_with_predictions.rds")
-# } else  {
-#   
-#   # 
-#   # fit_model_gen <- readRDS("~/mnt/p/userdata/mikusn22/data/Sulpride_trustgame/Model_results/M_gen_lkj_tight_sig_pr.
-#   
-#   colSdColMeans <- function(x, na.rm=TRUE) {
-#     if (na.rm) {
-#       n <- colSums(!is.na(x)) # thanks @flodel
-#     } else {
-#       n <- nrow(x)
-#     }
-#     colVar <- colMeans(x*x, na.rm=na.rm) - (colMeans(x, na.rm=na.rm))^2
-#     return(sqrt(colVar * n/(n-1)))
-#   }
-#   
-#   
-#   
-#   sample_no <- dim(Pars_extract_set$y_pred)[1]
-#   # someData <- rep(sample_no*76*50);
-#   lr1_mat<- array(NA, c( sample_no,76*50))
-#   y_pred_change<- array(NA, c( sample_no,76*50))
-#   y_pred_abschange<- array(NA, c( sample_no,76*50))
-#   y_pred_pos<- array(NA, c( sample_no,76*50))
-#   y_pred_neg<- array(NA, c( sample_no,76*50))
-#   y_pred_incon<- array(NA, c( sample_no,76*50))
-#   
-#   y_pred_change_mean <- array(NA, c( sample_no,76))
-#   y_pred_abschange_mean <- array(NA, c( sample_no,76))
-#   y_pred_pos_sum<- array(NA, c( sample_no,76))
-#   y_pred_neg_sum<- array(NA, c( sample_no,76))
-#   y_pred_incon_sum<- array(NA, c( sample_no,76))
-#   y_pred_rec_sum <- array(NA, c( sample_no,76))
-#   
-#   for (i in 1:sample_no) {
-#     if (i/(sample_no/100) == i%/%(sample_no/100) ) print(paste(i/sample_no*100, "%"))
-#     
-#     y_pred_chain <- Pars_extract_set$y_pred[i,,]
-#     y_pred_chain_long <- as.vector(t(y_pred_chain))
-#     
-#     Inv_Mat_good <- matrix(y_pred_chain_long[data_beh$Trustee == "Good"],nrow = 25)
-#     Inv_Mat_bad <- matrix(y_pred_chain_long[data_beh$Trustee == "Bad"],nrow = 25)
-#     
-#     # dim(Inv_Mat_good)
-#     Inv_Mat_good_change <- Inv_Mat_good[2:25,] - Inv_Mat_good[1:24,]
-#     Inv_Mat_bad_change <-  Inv_Mat_bad[2:25,] - Inv_Mat_bad[1:24,]
-#     # Inv_Mat_bad_change <- c(Na, Inv_Mat_bad_change)
-#     # head(Inv_Mat_bad_change_temp)
-#     
-#     Inv_Mat_good_change_temp <- matrix(0, 25,76)
-#     Inv_Mat_good_change_temp[25,] <- NA
-#     Inv_Mat_good_change_temp[1:24,] <- Inv_Mat_good_change
-#     
-#     Inv_Mat_bad_change_temp <- matrix(0, 25,76)
-#     Inv_Mat_bad_change_temp[25,] <- NA
-#     Inv_Mat_bad_change_temp[1:24,] <- Inv_Mat_bad_change
-#     
-#     Inv_Mat_good_change_long <- as.numeric(as.vector(Inv_Mat_good_change_temp))
-#     Inv_Mat_bad_change_long <-  as.numeric(as.vector(Inv_Mat_bad_change_temp))
-#     
-#     Change_check <- rep(-99, 3800)
-#     Change_check[data_beh$Trustee=="Good"] <- Inv_Mat_good_change_long
-#     Change_check[data_beh$Trustee=="Bad"] <- Inv_Mat_bad_change_long
-#     
-#     mu_good2_vect_chain_long <- as.vector(t(Pars_extract_set$mu_good2_vect[i,,]))
-#     mu_good1_vect_chain_long <- 1/(1+ exp(-mu_good2_vect_chain_long));
-#     mu_vect_mat_good <-  matrix(mu_good1_vect_chain_long[data_beh$Trustee == "Good"],nrow = 25)
-#     
-#     dasgmmu2 = as.numeric(data_beh$Backtransfer==1) - mu_good1_vect_chain_long;
-#     dasgmmu2_mat <-  matrix(dasgmmu2[data_beh$Trustee == "Good"],nrow = 25)
-#     
-#     diff_sgmmu2_mat = mu_vect_mat_good[2:25,] - mu_vect_mat_good[1:24,]
-#     
-#     lr1_good    = dasgmmu2_mat
-#     lr1_good[2:25,] = diff_sgmmu2_mat/dasgmmu2_mat[1:24,];
-#     lr1_good[1,] = NA
-#     lr1_good[dasgmmu2_mat==0] = 0;
-#     
-#     mu_bad2_vect_chain_long <- as.vector(t(Pars_extract_set$mu_bad2_vect[i,,]))
-#     mu_bad1_vect_chain_long <- 1/(1+ exp(-mu_bad2_vect_chain_long));
-#     mu_vect_mat_bad <-  matrix(mu_bad1_vect_chain_long[data_beh$Trustee == "Bad"],nrow = 25)
-#     
-#     dasgmmu2 = as.numeric(data_beh$Backtransfer==1) - mu_bad1_vect_chain_long;
-#     dasgmmu2_mat <-  matrix(dasgmmu2[data_beh$Trustee == "Bad"],nrow = 25)
-#     
-#     diff_sgmmu2_mat = mu_vect_mat_bad[2:25,] - mu_vect_mat_bad[1:24,]
-#     
-#     lr1_bad    = dasgmmu2_mat
-#     lr1_bad[2:25,] = diff_sgmmu2_mat/dasgmmu2_mat[1:24,];
-#     lr1_bad[1,] = NA
-#     lr1_bad[dasgmmu2_mat==0] = 0;
-#     
-#     lr1_mat[i,data_beh$Trustee=="Good"] <- as.vector(lr1_good)
-#     lr1_mat[i,data_beh$Trustee=="Bad"] <- as.vector(lr1_bad)
-#     
-#     y_pred_change[i,] <- Change_check
-#     y_pred_abschange[i,] <- abs(Change_check)
-#     y_pred_pos[i,] <- (data_beh$Backtransfer == 1 & Change_check > 0) | (data_beh$Backtransfer == 1 & y_pred_chain_long == 10)
-#     y_pred_neg[i,] <- (data_beh$Backtransfer == -1 & Change_check < 0 ) | (data_beh$Backtransfer == -1 & y_pred_chain_long == 0)
-#     y_pred_incon[i,] <- (data_beh$Backtransfer == 1 & Change_check < 0) | (data_beh$Backtransfer == -1 & Change_check > 0)
-#     
-#     data_pred_temp <- tibble(y_pred_pos_temp = y_pred_pos[i,],
-#                              y_pred_neg_temp = y_pred_neg[i,],
-#                              y_pred_incon_temp = y_pred_incon[i,],
-#                              ID = data_beh$ID,
-#                              Change_temp = Change_check) %>% 
-#       filter(!is.na(Change_temp)) %>%
-#       group_by(ID) %>% 
-#       summarise(sumincon = sum(y_pred_incon_temp),
-#                 sumposrec = sum(y_pred_pos_temp),
-#                 sumnegrec = sum(y_pred_neg_temp),
-#                 sumrec = sum(y_pred_pos_temp)+sum(y_pred_neg_temp),
-#                 abschange_mean = mean(abs(Change_temp)))
-#     
-#     # data_pred_temp 
-#     y_pred_abschange_mean[i,] <- data_pred_temp$abschange_mean 
-#     y_pred_pos_sum[i,]<- data_pred_temp$sumposrec 
-#     y_pred_neg_sum[i,]<- data_pred_temp$sumnegrec 
-#     y_pred_incon_sum[i,] <-data_pred_temp$sumincon 
-#     y_pred_rec_sum[i,] <- data_pred_temp$sumrec 
-#     
-#     
-#   }
-#   
-#   data_group$pred_mean_pos <- colMeans(y_pred_pos_sum)
-#   data_group$pred_mean_neg <- colMeans(y_pred_neg_sum)
-#   data_group$pred_mean_rec <- colMeans(y_pred_rec_sum)
-#   data_group$pred_mean_incon <- colMeans(y_pred_incon_sum)
-#   data_group$pred_mean_abschange <- colMeans(y_pred_abschange_mean)
-#   
-#   data_group$pred_sd_pos <- colSdColMeans(y_pred_pos_sum)
-#   data_group$pred_sd_neg <- colSdColMeans(y_pred_neg_sum)
-#   data_group$pred_sd_rec <- colSdColMeans(y_pred_rec_sum)
-#   data_group$pred_sd_incon <- colSdColMeans(y_pred_incon_sum)
-#   data_group$pred_sd_abschange <- colSdColMeans(y_pred_abschange_mean)
-#   
-#   
-#   # y_pred_change_mean <- colMeans(y_pred_change_mean)
-#   # y_pred_change_mean <- colSdColMeans(y_pred_change_mean)
-#   
-#   # y_pred_change_temp <- y_pred_change[1:10,]
-#   # dim(y_pred_change_mean > 0)
-#   
-#   data_beh$lr1 = colMeans(lr1_mat)
-#   
-#   data_plot_model_pred<- data_group %>%
-#     group_by(drug) %>%
-#     summarise(N = n(), 
-#               mean_incon= mean(pred_mean_incon),
-#               se_incon = sd(pred_mean_incon)/sqrt(N),
-#               mean_posrec = mean(pred_mean_pos),
-#               se_posrec = sd(pred_mean_pos)/sqrt(N),
-#               mean_negrec = mean(pred_mean_neg),
-#               se_negrec = sd(pred_mean_neg)/sqrt(N),
-#               mean_rec = mean(pred_mean_rec),
-#               se_rec = sd(pred_mean_rec)/sqrt(N))
-#   
-#   data_plot_model_pred_gen<- data_group %>%
-#     group_by(drug,ankk) %>%
-#     summarise(N = n(), 
-#               mean_incon= mean(pred_mean_incon),
-#               se_incon = sd(pred_mean_incon)/sqrt(N),
-#               mean_posrec = mean(pred_mean_pos),
-#               se_posrec = sd(pred_mean_pos)/sqrt(N),
-#               mean_negrec = mean(pred_mean_neg),
-#               se_negrec = sd(pred_mean_neg)/sqrt(N),
-#               mean_rec = mean(pred_mean_rec),
-#               se_rec = sd(pred_mean_rec)/sqrt(N))
-#   
-# 
-#   
-#   data_beh$predictions <- as.vector(t(colMeans(Pars_extract_set$y_pred)))
-#   # data_beh$predictions_sample <- y_pred_random_sample_long
-#   # data_beh$predictions_change <- y_pred_abschange_mean
-#   data_beh$predictions_abschange <- colMeans(y_pred_abschange)
-#   data_beh$mu_good2 <- as.vector(t(colMeans(Pars_extract_set$mu_good2_vect)))
-#   data_beh$mu_bad2 <- as.vector(t(colMeans(Pars_extract_set$mu_bad2_vect)))
-#   data_beh$pi_good <- as.vector(t(colMeans(Pars_extract_set$pi_good_vect)))
-#   data_beh$pi_bad <- as.vector(t(colMeans(Pars_extract_set$pi_bad_vect)))
-#   data_beh$pi_good2 <- as.vector(t(colMeans(Pars_extract_set$pi_good2_vect)))
-#   data_beh$pi_bad2 <- as.vector(t(colMeans(Pars_extract_set$pi_bad2_vect)))
-#   
-#   
-#   saveRDS(data_plot_model_pred, "Data4PlottingPosteriorChecks.rds")
-#   saveRDS(data_plot_model_pred_gen, "Data4PlottingPosteriorChecks_genotype.rds")
-#   saveRDS(lr1_mat, "Data4PlottingLearningRates.rds")
-#  
-#   saveRDS(data_group, "Data_group_with_predictions.rds")
-#   saveRDS(data_beh, "Data_beh_with_predictions.rds")
-# }
-# 
-# 
-# 
-# 
-# 
-# 
-# data_good <- data_beh[data_beh$Trustee =="Good",]
-# data_bad <- data_beh[data_beh$Trustee =="Bad",]
-# 
-# 
-# 
-# # plot model predictions  across time -------------------------------------------------
-# 
-# g_investment_smooth_pred <- ggplot() +
-#   stat_smooth(data = data_good, aes(x = Trial, y = predictions, group = Treatment, colour = Treatment)) +
-#   stat_summary(data = data_good, aes(x = Trial, y = Investment, group = Treatment, colour = Treatment), 
-#                geom = "point", fun.y = mean, shape = 17, size = 3)  +
-#   stat_smooth(data = data_bad, aes(x = Trial, y = predictions, group = Treatment, colour = Treatment)) +
-#   stat_summary(data = data_bad, aes(x = Trial, y = Investment, group = Treatment, colour = Treatment), 
-#                geom = "point", fun.y = mean, shape = 17, size = 3)  + 
-#   theme_Publication(base_size = 10) +
-#   
-#   theme(axis.ticks.x = element_blank(),
-#         legend.position = "none",
-#         panel.grid.major  = element_blank()) +
-#   ylab("Investment") +  xlab("Trials")+ discrete_scale("colour","Publication",manual_pal(values = c("#386cb0","#fdb462")))
-# 
-# g_legend_pred <- get_legend(g_investment_smooth_pred + 
-#                               theme(legend.position = "right",
-#                                     legend.key = element_rect(colour = NA),
-#                                     # legend.direction = "horizontal",
-#                                     legend.key.size= unit(0.2, "cm"),
-#                                     # legend.margin = unit(0, "cm"),
-#                                     legend.title = element_text(face="italic")))
-# 
-# 
-# 
-# 
-# 
-# p_change_pred <-data_beh %>% filter(!is.na(abs_change)) %>%
-#   ggplot(aes(x = Trial, y = predictions_abschange, group = ID, colour = Treatment)) +#
-#   # stat_smooth(aes(group = Treatment)) + 
-#   # stat_summary(aes(group = Treatment), geom = "point", fun.y = mean, shape = 17, size = 3) +
-#   theme_Publication(base_size = 10) +theme(legend.position = "none",
-#                              axis.ticks.x = element_blank(),
-#                              panel.grid.major  = element_blank()) +
-#   ylab("Absolute Investment Change")  + xlab("Trials") +  scale_colour_Publication() +
-#   stat_smooth(data = data_beh,aes(x = Trial, y = predictions_abschange,group = Treatment))
-# 
-# # plot_grid(g_investment_smooth, g_abs_change_time)
-# 
-# 
-# plot_grid(g_investment_smooth_pred, p_change_pred, g_legend_pred, ncol = 3, rel_widths = c(1,1, .4))
-# 
 
 ```
 
